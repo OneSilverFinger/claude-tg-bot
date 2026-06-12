@@ -295,7 +295,7 @@ async def cb_manual(cb: CallbackQuery, db, state: FSMContext):
     await cb.answer()
     await state.set_state(ManualPath.cwd)
     await cb.message.edit_text(
-        "Введи абсолютный путь к проекту на сервере, например <code>/home/kim/app</code>",
+        "Введи абсолютный путь к проекту на сервере, например <code>/home/ubuntu/app</code>",
         reply_markup=kb([[btn("✖️ Отмена", "p:manual:cancel")]]),
     )
 

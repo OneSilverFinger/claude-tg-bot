@@ -340,7 +340,7 @@ async def _ask_username(message: Message, state: FSMContext):
     else:
         await state.set_state(AddMachine.username)
         await message.answer(
-            "Логин SSH, например: <code>kim</code>", reply_markup=cancel_kb()
+            "Логин SSH, например: <code>ubuntu</code>", reply_markup=cancel_kb()
         )
 
 
