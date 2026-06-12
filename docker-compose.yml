@@ -3,6 +3,7 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    network_mode: host
     volumes:
       - bot-data:/data
     # No inbound ports: the bot uses long polling (outbound only).

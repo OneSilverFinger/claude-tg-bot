@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import os
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 
 from .access import AccessMiddleware
@@ -26,8 +28,12 @@ async def main():
     await db.init()
     ssh = SSHManager(crypto)
 
+    proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+    session = AiohttpSession(proxy=proxy_url) if proxy_url else AiohttpSession()
+
     bot = Bot(
         config.bot_token,
+        session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
