@@ -43,7 +43,12 @@ class SSHManager:
                 port=machine.get("port") or 22,
                 username=machine["username"],
                 known_hosts=None,
-                keepalive_interval=30,
+                # Heavy Claude runs peg the server's CPU, so sshd may be slow to
+                # answer keepalives. Probe often but tolerate ~10 min of missed
+                # replies before declaring the link dead, or long operations get
+                # killed mid-stream.
+                keepalive_interval=15,
+                keepalive_count_max=40,
                 **self._auth_options(machine),
             ),
             CONNECT_TIMEOUT,

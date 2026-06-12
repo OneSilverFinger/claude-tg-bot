@@ -1,8 +1,10 @@
+import asyncio
 import html
 import io
 import json
 import logging
 import shlex
+import time
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -174,8 +176,11 @@ async def _run_prompt(message: Message, db, ssh, prompt: str):
     editor = LiveEditor(message.bot, status.chat.id, status.message_id)
     transcript = Transcript()
     new_summary: list[str] = []
+    last_event = time.monotonic()
 
     async def on_event(event: dict):
+        nonlocal last_event
+        last_event = time.monotonic()
         transcript.feed(event)
         if event.get("type") == "summary" and event.get("summary"):
             new_summary.append(event["summary"])
@@ -183,6 +188,25 @@ async def _run_prompt(message: Message, db, ssh, prompt: str):
             await editor.maybe_update("🤔 <b>Работаю...</b>\n\n" + transcript.tail(),
                                       reply_markup=stop_kb())
 
+    started = time.monotonic()
+
+    async def heartbeat():
+        # During a long silent step (build, tests) no events arrive and the
+        # status would look frozen. Show elapsed time so it's clearly alive.
+        while True:
+            await asyncio.sleep(20)
+            if time.monotonic() - last_event < 18:
+                continue
+            elapsed = int(time.monotonic() - started)
+            mm, ss = divmod(elapsed, 60)
+            clock = f"{mm}м {ss:02d}с" if mm else f"{ss}с"
+            tail = transcript.tail(2500)
+            body = f"\n\n{tail}" if tail and tail != "…" else ""
+            await editor.maybe_update(
+                f"⏳ <b>Работаю… {clock}</b>{body}", reply_markup=stop_kb()
+            )
+
+    hb_task = asyncio.create_task(heartbeat())
     result = None
     error = None
     try:
@@ -191,6 +215,11 @@ async def _run_prompt(message: Message, db, ssh, prompt: str):
         log.exception("claude run failed")
         error = str(e)
     finally:
+        hb_task.cancel()
+        try:
+            await hb_task
+        except (asyncio.CancelledError, Exception):
+            pass
         _ACTIVE.pop(key, None)
 
     # Persist the (possibly new) session id so the next message resumes it.
