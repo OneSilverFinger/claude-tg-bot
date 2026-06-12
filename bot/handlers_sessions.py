@@ -61,7 +61,7 @@ async def _require_machine_cb(db, cb: CallbackQuery):
 
 
 def _session_header(machine: dict, cwd: str, title: str | None, session_id: str | None) -> str:
-    body = f"💬 {html.escape(title or '(без названия)')}" if session_id else "🆕 Новая сессия"
+    body = f"💬 {html.escape(trunc(title or '(без названия)', 200))}" if session_id else "🆕 Новая сессия"
     return (
         f"🖥 {html.escape(machine['name'])}\n"
         f"📁 <code>{html.escape(cwd)}</code>\n{body}"
@@ -323,7 +323,7 @@ async def st_manual(message: Message, state: FSMContext, db, ssh):
     if not cwd.startswith("/"):
         await message.answer("Нужен абсолютный путь (начинается с /). Попробуй /sessions ещё раз.")
         return
-    status = await message.answer("⏳ Открываю...", message_thread_id=message.message_thread_id)
+    status = await message.answer("⏳ Открываю...")
     await _open_session(
         status, message.chat.type, message.from_user.id, db, ssh,
         machine, {"dir": None, "cwd": cwd}, None,
@@ -349,8 +349,9 @@ async def _post_recap(bot, ssh, machine, project_dir, session_id, chat_id, threa
     )
     for role, text in tail:
         if role == "user":
+            body = html.escape(trunc(text, 1500))[:3800]
             await bot.send_message(
-                chat_id, "🧑 <b>Ты:</b>\n" + html.escape(trunc(text, 1500)),
+                chat_id, "🧑 <b>Ты:</b>\n" + body,
                 message_thread_id=thread_id or None,
             )
         else:

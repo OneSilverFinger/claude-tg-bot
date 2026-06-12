@@ -47,6 +47,161 @@ async def remove_claude_key(ssh, machine: dict) -> None:
     await ssh.run(machine, f"rm -f ~/{KEY_FILE}", timeout=15)
 
 
+_INSTALL_SCRIPT = r"""
+_fail() { echo "ERROR:$*"; exit 1; }
+
+# 1. Already installed?
+if command -v claude >/dev/null 2>&1; then
+    echo "ALREADY:$(claude --version 2>&1 | tail -1)"
+    exit 0
+fi
+
+# 2. Check Node.js >= 18
+HAS_NODE=0
+if command -v node >/dev/null 2>&1; then
+    MAJ=$(node -e 'console.log(process.version.split(".")[0].slice(1))' 2>/dev/null || echo 0)
+    [ "${MAJ:-0}" -ge 18 ] 2>/dev/null && HAS_NODE=1
+fi
+
+if [ "$HAS_NODE" = "0" ]; then
+    echo "INFO:Node.js отсутствует или устарел, устанавливаю..."
+    command -v curl >/dev/null 2>&1 || _fail "curl не найден — установи Node.js >= 18 вручную"
+
+    # Strategy 1: nvm (may already be installed)
+    if [ -s "${HOME}/.nvm/nvm.sh" ]; then
+        echo "INFO:nvm найден, использую его..."
+        . "${HOME}/.nvm/nvm.sh"
+        nvm install 22 2>&1 | tail -3 || true
+        nvm use 22 2>/dev/null || true
+    fi
+
+    # Strategy 2: fnm
+    if ! command -v node >/dev/null 2>&1; then
+        FNM_DIR="${HOME}/.fnm"
+        if [ ! -x "${FNM_DIR}/fnm" ]; then
+            echo "INFO:Скачиваю fnm..."
+            # Try official installer first
+            curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell 2>&1 | tail -3 || true
+            # If that didn't work, try direct GitHub zip
+            if [ ! -x "${FNM_DIR}/fnm" ]; then
+                echo "INFO:Пробую прямую загрузку fnm с GitHub..."
+                TMPF=$(mktemp /tmp/fnm_XXXXXX.zip)
+                curl -fsSL "https://github.com/Schniz/fnm/releases/latest/download/fnm-linux.zip" \
+                    -o "$TMPF" 2>&1 || _fail "не удалось скачать fnm (нет доступа к github.com?)"
+                mkdir -p "${FNM_DIR}"
+                command -v unzip >/dev/null 2>&1 || _fail "unzip не найден — установи Node.js >= 18 вручную"
+                unzip -o "$TMPF" fnm -d "${FNM_DIR}" 2>&1 | tail -2
+                chmod +x "${FNM_DIR}/fnm"
+                rm -f "$TMPF"
+            fi
+        fi
+        if [ -x "${FNM_DIR}/fnm" ]; then
+            export PATH="${FNM_DIR}:${PATH}"
+            echo "INFO:Скачиваю Node.js 22..."
+            FNM_OUT=$("${FNM_DIR}/fnm" install 22 2>&1)
+            FNM_RC=$?
+            [ $FNM_RC -eq 0 ] || _fail "fnm install 22 (exit ${FNM_RC}): $(echo "$FNM_OUT" | tail -2 | tr '\n' ' ')"
+            "${FNM_DIR}/fnm" use 22 2>/dev/null || true
+            eval "$("${FNM_DIR}/fnm" env --shell bash 2>/dev/null)" 2>/dev/null || true
+            # direct path fallback
+            NODE_BIN=$(find "${FNM_DIR}" -name "node" -type f 2>/dev/null | grep -v npm | head -1)
+            [ -n "$NODE_BIN" ] && export PATH="$(dirname "${NODE_BIN}"):${PATH}"
+            # persist to .profile (guarded)
+            grep -qF 'FNM_DIR' "${HOME}/.profile" 2>/dev/null \
+                || printf '\n[ -x "$HOME/.fnm/fnm" ] && export FNM_DIR="$HOME/.fnm" && export PATH="$FNM_DIR:$PATH" && eval "$($FNM_DIR/fnm env)" 2>/dev/null || true\n' \
+                    >> "${HOME}/.profile"
+        fi
+    fi
+
+    command -v node >/dev/null 2>&1 \
+        || _fail "node не найден. Установи Node.js >= 18 вручную: https://nodejs.org/en/download"
+    echo "INFO:Node.js $(node --version) установлен"
+else
+    echo "INFO:Node.js $(node --version) найден"
+fi
+
+# 3. Configure user-local npm prefix (no root needed)
+echo "INFO:Настраиваю npm prefix..."
+NPM_PREFIX="${HOME}/.npm-global"
+mkdir -p "${NPM_PREFIX}/bin"
+npm config set prefix "${NPM_PREFIX}" 2>&1 || true
+grep -qF '.npm-global' "${HOME}/.profile" 2>/dev/null \
+    || printf '\nexport PATH="$HOME/.npm-global/bin:$PATH"\n' >> "${HOME}/.profile"
+export PATH="${NPM_PREFIX}/bin:${PATH}"
+
+# 4. Install
+echo "INFO:Устанавливаю @anthropic-ai/claude-code..."
+NPM_LOG=$(npm install -g @anthropic-ai/claude-code 2>&1)
+NPM_RC=$?
+if [ $NPM_RC -ne 0 ]; then
+    _fail "npm error: $(echo "$NPM_LOG" | grep -i 'error\|err!' | tail -3 | tr '\n' ' ')"
+fi
+ADDED=$(echo "$NPM_LOG" | grep -E 'added [0-9]' | head -1)
+[ -n "$ADDED" ] && echo "INFO:$ADDED"
+
+# 5. Verify
+command -v claude >/dev/null 2>&1 \
+    && { echo "DONE:$(claude --version 2>&1 | tail -1)"; exit 0; }
+
+_fail "claude не найден после установки (npm prefix: ${NPM_PREFIX})"
+"""
+
+
+async def install_claude(ssh, machine: dict, on_progress) -> str:
+    """Install Claude Code CLI on the remote machine.
+
+    Calls on_progress(text) for each status line.
+    Returns the version string on success, raises RuntimeError on failure.
+    """
+    conn = await ssh.connect(machine)
+    cmd = login_shell(_INSTALL_SCRIPT)
+    proc = await conn.create_process(cmd, encoding="utf-8", errors="replace")
+
+    stderr_lines: list[str] = []
+
+    async def drain_stderr():
+        try:
+            async for line in proc.stderr:
+                s = line.strip()
+                if s:
+                    stderr_lines.append(s)
+        except Exception:
+            pass
+
+    stderr_task = asyncio.create_task(drain_stderr())
+    result: str | None = None
+    error: str | None = None
+    try:
+        async for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("INFO:"):
+                await on_progress(line[5:])
+            elif line.startswith("ALREADY:"):
+                result = line[8:].strip() or "уже установлен"
+                await on_progress(f"уже установлен: {result}")
+            elif line.startswith("DONE:"):
+                result = line[5:].strip() or "установлен"
+            elif line.startswith("ERROR:"):
+                error = line[6:].strip()
+    finally:
+        stderr_task.cancel()
+        try:
+            await stderr_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    if error:
+        detail = "\n".join(stderr_lines[-5:])
+        raise RuntimeError(f"{error}" + (f"\n{detail}" if detail else ""))
+    if result is None:
+        stderr_tail = "\n".join(stderr_lines[-8:])
+        raise RuntimeError("установка завершилась без подтверждения"
+                           + (f"\nstderr:\n{stderr_tail}" if stderr_tail else ""))
+    return result
+
+
 def _parse_lines(data: bytes, skip_first_partial: bool = False) -> list[dict]:
     objs = []
     lines = data.split(b"\n")

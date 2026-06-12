@@ -130,7 +130,10 @@ async def cb_delete_ok(cb: CallbackQuery, db, ssh):
 
 def _key_menu(machine: dict):
     has = bool(machine.get("claude_key_enc"))
-    rows = [[btn("🔐 Войти по подписке (claude setup-token)", f"m:keyset:{machine['id']}")]]
+    rows = [
+        [btn("⚙️ Установить Claude Code", f"m:install:{machine['id']}")],
+        [btn("🔐 Войти по подписке (claude setup-token)", f"m:keyset:{machine['id']}")],
+    ]
     if has:
         rows.append([btn("🧹 Убрать авторизацию с сервера", f"m:keyclr:{machine['id']}")])
     rows.append([btn("⬅️ Машины", "menu:machines")])
@@ -229,6 +232,59 @@ async def cb_key_clear(cb: CallbackQuery, db, ssh):
     await cb.message.edit_text(text, reply_markup=markup)
 
 
+# ---- install claude ----
+
+@router.callback_query(F.data.startswith("m:install:"))
+async def cb_install(cb: CallbackQuery, db, ssh):
+    machine_id = int(cb.data.split(":")[2])
+    machine = await db.machine(machine_id, cb.from_user.id)
+    if not machine:
+        await cb.answer("Машина не найдена", show_alert=True)
+        return
+    await cb.answer()
+
+    status = await cb.message.edit_text(
+        f"⚙️ <b>Установка Claude Code на {html.escape(machine['name'])}</b>\n\n"
+        "⏳ Подключаюсь...",
+    )
+
+    lines: list[str] = []
+
+    async def on_progress(msg: str):
+        lines.append(msg)
+        body = "\n".join(f"  • {l}" for l in lines[-6:])
+        try:
+            await status.edit_text(
+                f"⚙️ <b>Установка Claude Code на {html.escape(machine['name'])}</b>\n\n"
+                f"{body}",
+            )
+        except Exception:
+            pass
+
+    try:
+        version = await claude.install_claude(ssh, machine, on_progress)
+    except Exception as e:
+        await status.edit_text(
+            f"❌ <b>Ошибка установки на {html.escape(machine['name'])}</b>\n\n"
+            f"<code>{html.escape(str(e)[:400])}</code>",
+            reply_markup=kb([
+                [btn("🔄 Попробовать снова", f"m:install:{machine_id}")],
+                [btn("⬅️ Машины", "menu:machines")],
+            ]),
+        )
+        return
+
+    await status.edit_text(
+        f"✅ <b>Claude Code установлен на {html.escape(machine['name'])}</b>\n\n"
+        f"Версия: <code>{html.escape(version)}</code>\n\n"
+        "Теперь авторизуй Claude — нужен токен подписки (<code>claude setup-token</code>).",
+        reply_markup=kb([
+            [btn("🔐 Авторизовать", f"m:keyset:{machine_id}")],
+            [btn("⬅️ Машины", "menu:machines")],
+        ]),
+    )
+
+
 # ---- add machine flow ----
 
 @router.callback_query(F.data == "m:cancel")
@@ -257,7 +313,7 @@ async def st_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip()[:50])
     await state.set_state(AddMachine.host)
     await message.answer(
-        "Хост или IP сервера (без логина), например: <code>events.tlbops.com</code>",
+        "Хост или IP сервера (без логина), например: <code>server.example.com</code>",
         reply_markup=cancel_kb(),
     )
 

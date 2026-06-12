@@ -37,7 +37,6 @@ async def _need_binding(message: Message, db):
     if not binding or not binding.get("machine_id") or not binding.get("cwd"):
         await message.answer(
             "Сначала выбери машину и проект через /menu.",
-            message_thread_id=message.message_thread_id,
         )
         return None, None
     machine = await db.machine(binding["machine_id"], binding["user_id"])
@@ -85,7 +84,7 @@ async def on_file(message: Message, db, ssh):
     if not machine:
         return
     status = await message.answer(
-        "⏳ Загружаю файл на сервер...", message_thread_id=message.message_thread_id
+        "⏳ Загружаю файл на сервер...",
     )
     try:
         path = await _upload_file(message, ssh, machine, binding["cwd"])
@@ -145,7 +144,6 @@ async def _run_prompt(message: Message, db, ssh, prompt: str):
     if key in _ACTIVE:
         await message.answer(
             "⏳ Предыдущий запрос ещё выполняется. Дождись его или нажми «Остановить».",
-            message_thread_id=message.message_thread_id,
         )
         return
 
@@ -172,14 +170,16 @@ async def _run_prompt(message: Message, db, ssh, prompt: str):
 
     status = await message.answer(
         "🤔 Claude думает...", reply_markup=stop_kb(),
-        message_thread_id=message.message_thread_id,
     )
     editor = LiveEditor(message.bot, status.chat.id, status.message_id)
     transcript = Transcript()
+    new_summary: list[str] = []
 
     async def on_event(event: dict):
         transcript.feed(event)
-        if event.get("type") in ("assistant", "user"):
+        if event.get("type") == "summary" and event.get("summary"):
+            new_summary.append(event["summary"])
+        elif event.get("type") in ("assistant", "user"):
             await editor.maybe_update("🤔 <b>Работаю...</b>\n\n" + transcript.tail(),
                                       reply_markup=stop_kb())
 
@@ -196,6 +196,18 @@ async def _run_prompt(message: Message, db, ssh, prompt: str):
     # Persist the (possibly new) session id so the next message resumes it.
     if run.session_id and run.session_id != binding.get("session_id"):
         await db.upsert_binding(*key, message.from_user.id, session_id=run.session_id)
+
+    # Sync forum topic name with Claude's auto-generated summary.
+    if new_summary and message.message_thread_id and not error and not run.stopped:
+        summary = new_summary[-1]
+        topic_name = f"{machine['name']}: {summary}"[:128]
+        try:
+            await message.bot.edit_forum_topic(
+                message.chat.id, message.message_thread_id, name=topic_name
+            )
+            await db.upsert_binding(*key, message.from_user.id, title=summary)
+        except Exception:
+            pass
 
     await _finalize(message, editor, run, transcript, result, error)
 
