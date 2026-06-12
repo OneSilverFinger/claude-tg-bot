@@ -1,5 +1,7 @@
 # Claude Code in Telegram
 
+[![CI](https://github.com/OneSilverFinger/claude-tg-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/OneSilverFinger/claude-tg-bot/actions/workflows/ci.yml)
+
 *Read this in [Русский](README.ru.md).*
 
 A bridge between Telegram and Claude Code running on your own servers. Sessions
