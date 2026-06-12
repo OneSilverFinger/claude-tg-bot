@@ -10,7 +10,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from . import claude
+from . import claude, transcribe
 from .keyboards import stop_kb
 from .render import LiveEditor, Transcript, send_long
 
@@ -109,6 +109,56 @@ async def on_file(message: Message, db, ssh):
     )
     if caption:
         await _run_prompt(message, db, ssh, caption)
+
+
+# ---- voice / video notes ----
+
+@router.message(F.voice | F.video_note)
+async def on_voice(message: Message, db, ssh, config):
+    if message.chat.type == "private":
+        await message.answer(PRIVATE_REDIRECT)
+        return
+    binding, machine = await _need_binding(message, db)
+    if not machine:
+        return
+    if not config.stt_api_key:
+        await message.answer(
+            "🎤 Транскрипция голосовых не настроена. Задай <code>STT_API_KEY</code> "
+            "в <code>.env</code> (по умолчанию используется Groq Whisper) и пересобери бота."
+        )
+        return
+
+    if message.voice:
+        file_obj, fname = message.voice, "voice.ogg"
+    else:
+        file_obj, fname = message.video_note, "note.mp4"
+    if getattr(file_obj, "file_size", 0) and file_obj.file_size > MAX_FILE:
+        await message.answer("Запись слишком большая (Telegram отдаёт ботам до 20 МБ).")
+        return
+
+    status = await message.answer("🎤 Распознаю...")
+    try:
+        buf = io.BytesIO()
+        await message.bot.download(file_obj, destination=buf)
+        text = await transcribe.transcribe(
+            buf.getvalue(), fname,
+            base_url=config.stt_base_url,
+            api_key=config.stt_api_key,
+            model=config.stt_model,
+        )
+    except Exception as e:
+        log.exception("transcription failed")
+        await status.edit_text(
+            f"❌ Не удалось распознать: <code>{html.escape(str(e)[:200])}</code>"
+        )
+        return
+
+    if not text:
+        await status.edit_text("🎤 Ничего не распознал — пустая или неразборчивая запись.")
+        return
+
+    await status.edit_text("🎤 <i>" + html.escape(text) + "</i>")
+    await _run_prompt(message, db, ssh, text)
 
 
 # ---- main chat ----

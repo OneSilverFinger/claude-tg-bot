@@ -9,6 +9,9 @@ class Config:
     allowed_user_ids: set[int]
     default_model: str | None
     db_path: str
+    stt_api_key: str | None
+    stt_base_url: str
+    stt_model: str
 
 
 def load_config() -> Config:
@@ -37,4 +40,11 @@ def load_config() -> Config:
         allowed_user_ids=allowed,
         default_model=os.environ.get("DEFAULT_MODEL", "").strip() or None,
         db_path=os.environ.get("DB_PATH", "/data/bot.db"),
+        # Optional voice transcription via any OpenAI-compatible STT endpoint.
+        # Defaults target Groq Whisper; set STT_API_KEY to switch it on.
+        stt_api_key=os.environ.get("STT_API_KEY", "").strip() or None,
+        stt_base_url=(os.environ.get("STT_BASE_URL", "").strip()
+                      or "https://api.groq.com/openai/v1"),
+        stt_model=(os.environ.get("STT_MODEL", "").strip()
+                   or "whisper-large-v3-turbo"),
     )

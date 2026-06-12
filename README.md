@@ -35,6 +35,9 @@ never talks to Claude — it is only the control panel.
   long silent steps.
 - Pick a model (opus / sonnet / haiku) per topic with `/model`.
 - Send files and photos: uploaded to the server, the path is passed to Claude.
+- Voice and video notes are transcribed (any OpenAI-compatible Whisper endpoint —
+  Groq / OpenAI / local) and sent to Claude as the prompt. Optional, off until
+  `STT_API_KEY` is set.
 - "Stop" button and `/stop` command.
 - Restore Claude's authorization on the server through the bot (see below).
 - Telegram-ID whitelist.
