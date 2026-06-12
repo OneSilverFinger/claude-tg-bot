@@ -1,0 +1,4 @@
+aiogram>=3.15,<4
+asyncssh>=2.18
+cryptography>=43
+aiosqlite>=0.20
