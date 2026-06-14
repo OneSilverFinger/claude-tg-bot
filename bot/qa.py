@@ -23,10 +23,12 @@ log = logging.getLogger(__name__)
 
 QA_DIR = "qa"                                   # relative to the project cwd
 SHOTS_DIR = f"{QA_DIR}/shots"
+PROGRESS_FILE = f"{QA_DIR}/progress.md"          # live step feed the tester appends to
 MCP_CONFIG = ".claude/qa-playwright-mcp.json"   # relative to remote home
 MARKER = ".claude/.qa-installed"                # relative to remote home
-MAX_SHOTS = 10
+MAX_SHOTS = 20
 MAX_SHOT_BYTES = 10 * 1024 * 1024
+MAX_PROGRESS_BYTES = 16384
 
 _MCP_CONFIG_JSON = (
     '{\n'
@@ -137,9 +139,13 @@ async def install(ssh, machine: dict, on_progress) -> str:
     return result
 
 
-async def new_screenshots(ssh, machine: dict, cwd: str,
-                          since_mtime: float) -> list[tuple[str, bytes]]:
-    """PNG/JPG files under <cwd>/qa/shots newer than since_mtime, as (name, bytes)."""
+async def new_screenshots(ssh, machine: dict, cwd: str, since_mtime: float,
+                          exclude: set[str] | None = None) -> list[tuple[str, bytes]]:
+    """PNG/JPG files under <cwd>/qa/shots newer than since_mtime, as (name, bytes).
+
+    Names in `exclude` are skipped (used to avoid re-sending already-streamed shots).
+    """
+    exclude = exclude or set()
     sftp = await ssh.sftp(machine)
     shots_dir = f"{cwd.rstrip('/')}/{SHOTS_DIR}"
     try:
@@ -149,7 +155,7 @@ async def new_screenshots(ssh, machine: dict, cwd: str,
 
     picked = []
     for e in entries:
-        if e.filename in (".", ".."):
+        if e.filename in (".", "..") or e.filename in exclude:
             continue
         if not e.filename.lower().endswith((".png", ".jpg", ".jpeg")):
             continue
@@ -170,6 +176,20 @@ async def new_screenshots(ssh, machine: dict, cwd: str,
     return out
 
 
+async def read_progress(ssh, machine: dict, cwd: str) -> str:
+    """Full text of <cwd>/qa/progress.md, or '' if absent. Small live step feed."""
+    sftp = await ssh.sftp(machine)
+    path = f"{cwd.rstrip('/')}/{PROGRESS_FILE}"
+    try:
+        async with sftp.open(path, "rb") as f:
+            data = await f.read(MAX_PROGRESS_BYTES)
+        return data.decode("utf-8", errors="replace").strip()
+    except (asyncssh.SFTPError, OSError):
+        return ""
+    except Exception:
+        return ""
+
+
 ORCHESTRATION_PROMPT = f"""\
 Пользователь просит протестировать то, что мы только что сделали — независимым \
 ручным QA-прогоном через браузер. Действуй сам, шаг за шагом:
@@ -180,17 +200,18 @@ ORCHESTRATION_PROMPT = f"""\
 запущен ли дев-сервер и на каком порту). Если URL никак не определить или нужен \
 тестовый аккаунт, которого у тебя нет — задай ОДИН короткий вопрос пользователю и \
 останови работу, не запуская тест.
-3. Создай папку `{SHOTS_DIR}`.
+3. Подготовь папку `{SHOTS_DIR}` и очисти прошлый прогон: \
+`mkdir -p {SHOTS_DIR} && rm -f {SHOTS_DIR}/*.png {QA_DIR}/progress.md`.
 4. Запусти НЕЗАВИСИМОГО тестировщика отдельным процессом (дай ему до 10 минут — \
 тест идёт через браузер):
 
    claude -p --mcp-config ~/{MCP_CONFIG} --permission-mode bypassPermissions \\
-     --append-system-prompt "Ты независимый ручной QA. Выполняй кейсы строго по плану через инструменты Playwright. НЕ меняй код приложения. Для каждого кейса фиксируй PASS/FAIL, actual vs expected; при падении делай скриншот в {SHOTS_DIR}/<номер-кейса>.png и прикладывай ошибки из консоли и сети." \\
-     "Прогони {QA_DIR}/test-plan.md против <URL приложения> и запиши итог в {QA_DIR}/report.md. Скриншоты складывай в {SHOTS_DIR}/."
+     --append-system-prompt "Ты независимый ручной QA. Выполняй кейсы строго по плану через инструменты Playwright. НЕ меняй код приложения. ДЕМОНСТРИРУЙ ХОД: после КАЖДОГО кейса сразу (а) сделай скриншот в {SHOTS_DIR}/NN-краткое-имя.png (NN — номер кейса), (б) одной строкой допиши результат в {QA_DIR}/progress.md в формате 'TC-NN ✅/❌ — что проверял'. Не жди конца — пиши прогресс по ходу. Фиксируй actual vs expected; при падении добавляй ошибки из консоли и сети." \\
+     "Прогони {QA_DIR}/test-plan.md против <URL приложения>. Пиши прогресс в {QA_DIR}/progress.md и скриншоты в {SHOTS_DIR}/ ПО ХОДУ каждого кейса. Итог запиши в {QA_DIR}/report.md."
 
 5. Прочитай `{QA_DIR}/report.md` и дай мне краткий понятный итог: сколько кейсов \
-прошло/упало и что именно сломано. Скриншоты падений ты сложил в `{SHOTS_DIR}/` — \
-я их покажу в чате автоматически.
+прошло/упало и что именно сломано. Скриншоты и ход теста я показываю в чате \
+по ходу автоматически — их дублировать в ответе не нужно.
 
 Сам код приложения на этом шаге НЕ правь — просто протестируй и доложи. Если \
 потом я скажу «исправь», у тебя уже будет полный контекст теста.

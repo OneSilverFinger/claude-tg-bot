@@ -258,7 +258,45 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
                 f"⏳ <b>Работаю… {clock}</b>{body}", reply_markup=stop_kb()
             )
 
+    # Live QA demonstration: stream screenshots + step progress as the
+    # independent tester works, so a multi-minute run isn't a black box.
+    sent_shots: set[str] = set()
+    qa_editor = None
+    if qa_run:
+        qa_msg = await message.answer(
+            "🧪 <b>Тестирование запущено</b>\nСобираю кейсы и поднимаю браузер…"
+        )
+        qa_editor = LiveEditor(message.bot, qa_msg.chat.id, qa_msg.message_id, interval=1.0)
+
+    async def qa_feed():
+        last_progress = ""
+        while True:
+            await asyncio.sleep(8)
+            try:
+                shots = await qa.new_screenshots(
+                    ssh, machine, binding["cwd"], qa_since, exclude=sent_shots
+                )
+                for name, data in shots:
+                    sent_shots.add(name)
+                    try:
+                        await message.bot.send_photo(
+                            message.chat.id, BufferedInputFile(data, filename=name),
+                            caption="🧪 " + html.escape(name),
+                            message_thread_id=message.message_thread_id or None,
+                        )
+                    except Exception:
+                        log.exception("qa live screenshot failed")
+                prog = await qa.read_progress(ssh, machine, binding["cwd"])
+                if prog and prog != last_progress and qa_editor:
+                    last_progress = prog
+                    await qa_editor.set("🧪 <b>Ход теста</b>\n\n" + html.escape(prog[-3000:]))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("qa feed iteration failed")
+
     hb_task = asyncio.create_task(heartbeat())
+    qa_task = asyncio.create_task(qa_feed()) if qa_run else None
     result = None
     error = None
     try:
@@ -268,10 +306,14 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
         error = str(e)
     finally:
         hb_task.cancel()
-        try:
-            await hb_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        if qa_task:
+            qa_task.cancel()
+        for t in (hb_task, qa_task):
+            if t:
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
         _ACTIVE.pop(key, None)
 
     # Persist the (possibly new) session id so the next message resumes it.
@@ -293,22 +335,21 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
     await _finalize(message, editor, run, transcript, result, error, qa_run=qa_run)
 
     if qa_run and not error and not run.stopped:
-        await _send_qa_screenshots(message, ssh, machine, binding["cwd"], qa_since)
+        # Final sweep for any shots the live feed didn't catch (already-sent
+        # ones are excluded so nothing is duplicated).
+        await _send_qa_screenshots(message, ssh, machine, binding["cwd"], qa_since,
+                                   exclude=sent_shots)
 
 
-async def _send_qa_screenshots(message, ssh, machine, cwd, since_mtime):
+async def _send_qa_screenshots(message, ssh, machine, cwd, since_mtime, exclude=None):
     try:
-        shots = await qa.new_screenshots(ssh, machine, cwd, since_mtime)
+        shots = await qa.new_screenshots(ssh, machine, cwd, since_mtime, exclude=exclude)
     except Exception:
         log.exception("fetching qa screenshots failed")
         return
     if not shots:
         return
     thread_id = message.message_thread_id
-    await message.bot.send_message(
-        message.chat.id, f"🖼 Скриншоты теста ({len(shots)}):",
-        message_thread_id=thread_id or None,
-    )
     for name, data in shots:
         try:
             await message.bot.send_photo(
