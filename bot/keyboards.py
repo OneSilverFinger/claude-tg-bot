@@ -26,5 +26,9 @@ def stop_kb() -> InlineKeyboardMarkup:
     return kb([[btn("⏹ Остановить", "run:stop")]])
 
 
+def test_kb() -> InlineKeyboardMarkup:
+    return kb([[btn("🧪 Протестировать", "qa:run")]])
+
+
 def back_kb(data: str = "menu:main") -> InlineKeyboardMarkup:
     return kb([[btn("⬅️ Назад", data)]])

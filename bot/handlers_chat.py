@@ -8,10 +8,10 @@ import time
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
-from . import claude, transcribe
-from .keyboards import stop_kb
+from . import claude, qa, transcribe
+from .keyboards import stop_kb, test_kb
 from .render import LiveEditor, Transcript, send_long
 
 log = logging.getLogger(__name__)
@@ -191,7 +191,7 @@ async def on_text(message: Message, db, ssh):
     await _run_prompt(message, db, ssh, message.text.strip())
 
 
-async def _run_prompt(message: Message, db, ssh, prompt: str):
+async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = False):
     key = _key(message)
     if key in _ACTIVE:
         await message.answer(
@@ -202,6 +202,8 @@ async def _run_prompt(message: Message, db, ssh, prompt: str):
     binding, machine = await _need_binding(message, db)
     if not machine:
         return
+
+    qa_since = time.time() if qa_run else 0.0
 
     pending = json.loads(binding.get("pending_files") or "[]")
     if pending:
@@ -288,10 +290,36 @@ async def _run_prompt(message: Message, db, ssh, prompt: str):
         except Exception:
             pass
 
-    await _finalize(message, editor, run, transcript, result, error)
+    await _finalize(message, editor, run, transcript, result, error, qa_run=qa_run)
+
+    if qa_run and not error and not run.stopped:
+        await _send_qa_screenshots(message, ssh, machine, binding["cwd"], qa_since)
 
 
-async def _finalize(message, editor, run, transcript, result, error):
+async def _send_qa_screenshots(message, ssh, machine, cwd, since_mtime):
+    try:
+        shots = await qa.new_screenshots(ssh, machine, cwd, since_mtime)
+    except Exception:
+        log.exception("fetching qa screenshots failed")
+        return
+    if not shots:
+        return
+    thread_id = message.message_thread_id
+    await message.bot.send_message(
+        message.chat.id, f"🖼 Скриншоты теста ({len(shots)}):",
+        message_thread_id=thread_id or None,
+    )
+    for name, data in shots:
+        try:
+            await message.bot.send_photo(
+                message.chat.id, BufferedInputFile(data, filename=name),
+                caption=html.escape(name), message_thread_id=thread_id or None,
+            )
+        except Exception:
+            log.exception("sending qa screenshot %s failed", name)
+
+
+async def _finalize(message, editor, run, transcript, result, error, qa_run=False):
     thread_id = message.message_thread_id
 
     if run.stopped:
@@ -330,14 +358,16 @@ async def _finalize(message, editor, run, transcript, result, error):
 
     answer = (result.get("result") or "").strip()
     meta = _meta_suffix(result)
+    # Offer one-tap QA after a normal run; skip it on the QA run itself.
+    done_kb = None if qa_run else test_kb()
 
     if not answer:
         await editor.set("✅ Готово (без текстового ответа).\n\n" + transcript.tail(2000)
-                         + meta)
+                         + meta, reply_markup=done_kb)
         return
 
     # Replace the live status with a short header, then post the full answer.
-    await editor.set("✅ <b>Готово</b>" + meta)
+    await editor.set("✅ <b>Готово</b>" + meta, reply_markup=done_kb)
     await send_long(message.bot, message.chat.id, answer, thread_id=thread_id)
 
 

@@ -12,7 +12,9 @@ from .config import load_config
 from .crypto import Crypto
 from .db import Database
 from .ssh import SSHManager
-from . import handlers_chat, handlers_machines, handlers_menu, handlers_sessions
+from . import (
+    handlers_chat, handlers_machines, handlers_menu, handlers_qa, handlers_sessions,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +53,7 @@ async def main():
     dp.include_router(handlers_menu.router)
     dp.include_router(handlers_machines.router)
     dp.include_router(handlers_sessions.router)
+    dp.include_router(handlers_qa.router)
     dp.include_router(handlers_chat.router)
 
     me = await bot.get_me()

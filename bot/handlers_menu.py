@@ -17,7 +17,7 @@ WELCOME = (
     "и привяжется сам.\n"
     "3. «Проекты и сессии» — выбери сессию, бот откроет её темой в группе.\n"
     "4. Общайся с Claude и кидай файлы прямо в теме.\n\n"
-    "Команды внутри темы: /status · /model · /sessions · /stop · /unbind"
+    "Команды внутри темы: /status · /model · /sessions · /test · /stop · /unbind"
 )
 
 _bot_username: str | None = None
