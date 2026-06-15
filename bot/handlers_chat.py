@@ -3,6 +3,7 @@ import html
 import io
 import json
 import logging
+import re
 import shlex
 import time
 
@@ -344,7 +345,7 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
         except Exception:
             pass
 
-    await _finalize(message.bot, message.chat.id, message.message_thread_id,
+    await _finalize(message.bot, ssh, message.chat.id, message.message_thread_id,
                     editor, run, transcript, result, error, qa_run=qa_run)
 
     if qa_run and not error and not run.stopped:
@@ -373,7 +374,60 @@ async def _send_qa_screenshots(message, ssh, machine, cwd, since_mtime, exclude=
             log.exception("sending qa screenshot %s failed", name)
 
 
-async def _finalize(bot, chat_id, thread_id, editor, run, transcript, result, error,
+# Deliverable-looking files the agent may reference in its answer — send the
+# actual file, not just the path. Source/config extensions are deliberately
+# excluded so a code discussion doesn't dump source files.
+_FILE_RE = re.compile(
+    r"(/?[\w.\-]+(?:/[\w.\-]+)*\.(?:png|jpe?g|gif|webp|svg|pdf|zip|tar|gz|tgz|"
+    r"csv|xlsx?|docx?|pptx?|mp4|mov|mp3|wav|log))\b",
+    re.IGNORECASE,
+)
+MAX_SEND_FILE = 20 * 1024 * 1024
+
+
+async def _send_referenced_files(bot, ssh, machine, cwd, chat_id, thread_id, text):
+    """If the answer references existing deliverable files, send them as documents."""
+    if not text:
+        return
+    seen, cands = set(), []
+    for m in _FILE_RE.finditer(text):
+        p = m.group(1)
+        if p not in seen:
+            seen.add(p)
+            cands.append(p)
+    if not cands:
+        return
+    try:
+        sftp = await ssh.sftp(machine)
+    except Exception:
+        return
+    sent = 0
+    for p in cands:
+        if sent >= 5:
+            break
+        abspath = p if p.startswith("/") else f"{cwd.rstrip('/')}/{p}"
+        try:
+            st = await sftp.stat(abspath)
+            size = st.size or 0
+            if size == 0 or size > MAX_SEND_FILE:
+                continue
+            async with sftp.open(abspath, "rb") as f:
+                data = await f.read()
+        except Exception:
+            continue
+        name = abspath.rsplit("/", 1)[-1]
+        try:
+            await bot.send_document(
+                chat_id, BufferedInputFile(data, filename=name),
+                caption=f"📎 <code>{html.escape(abspath)}</code>",
+                message_thread_id=thread_id or None,
+            )
+            sent += 1
+        except Exception:
+            log.exception("send_document failed for %s", abspath)
+
+
+async def _finalize(bot, ssh, chat_id, thread_id, editor, run, transcript, result, error,
                     qa_run=False):
     if run.stopped:
         await editor.set("⏹ Остановлено.\n\n" + transcript.tail(2000))
@@ -422,6 +476,8 @@ async def _finalize(bot, chat_id, thread_id, editor, run, transcript, result, er
     # Replace the live status with a short header, then post the full answer.
     await editor.set("✅ <b>Готово</b>" + meta, reply_markup=done_kb)
     await send_long(bot, chat_id, answer, thread_id=thread_id)
+    # If the answer points at real deliverable files, send them too.
+    await _send_referenced_files(bot, ssh, run.machine, run.cwd, chat_id, thread_id, answer)
 
 
 def _meta_suffix(result: dict) -> str:

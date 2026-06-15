@@ -11,8 +11,7 @@ result, the user is told — the session context on disk is preserved either way
 import asyncio
 import logging
 
-from . import claude
-from .handlers_chat import _finalize
+from . import claude, handlers_chat
 from .render import LiveEditor, Transcript
 
 log = logging.getLogger(__name__)
@@ -29,6 +28,8 @@ async def recover(bot, db, ssh) -> None:
 
 async def _recover_one(bot, db, ssh, r: dict) -> None:
     chat_id, thread_id = r["chat_id"], r["thread_id"]
+    key = (chat_id, thread_id)
+    run = None
     try:
         machine = await db.machine(r["machine_id"], r["user_id"])
         if not machine:
@@ -37,6 +38,9 @@ async def _recover_one(bot, db, ssh, r: dict) -> None:
             machine=machine, cwd=r["cwd"], resume_id=r.get("session_id"),
             model=r.get("model"), run_id=r["run_id"],
         )
+        # Register so /stop and the «Остановить» button work on a recovered run,
+        # and so a new message on this thread is held until recovery finishes.
+        handlers_chat._ACTIVE[key] = run
         editor = LiveEditor(bot, chat_id, r["message_id"])
         transcript = Transcript()
         await editor.set("♻️ <b>Бот перезапускался</b> — восстанавливаю выполнявшийся запрос…")
@@ -60,13 +64,16 @@ async def _recover_one(bot, db, ssh, r: dict) -> None:
             except Exception:
                 log.exception("recovery: persist session failed")
 
-        if result is None and error is None:
+        if result is None and error is None and not run.stopped:
             error = ("запрос был прерван перезапуском бота и не завершился. "
                      "Контекст сессии сохранён — можешь повторить или продолжить.")
 
-        await _finalize(bot, chat_id, thread_id, editor, run, transcript, result, error)
-        await run.cleanup(ssh)
+        await handlers_chat._finalize(bot, ssh, chat_id, thread_id, editor, run,
+                                      transcript, result, error)
     except Exception:
         log.exception("recovery failed for chat=%s thread=%s", chat_id, thread_id)
     finally:
+        handlers_chat._ACTIVE.pop(key, None)
+        if run is not None:
+            await run.cleanup(ssh)
         await db.delete_active_run(chat_id, thread_id)

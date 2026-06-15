@@ -448,7 +448,13 @@ class ClaudeRun:
         buf = ""
         result = None
         dead_checks = 0
+        polls = 0
+        max_polls = 1800  # ~36 min hard cap so a wedged run can't hang forever
         while True:
+            polls += 1
+            if polls > max_polls:
+                log.warning("follow: hard cap reached for run %s", self.run_id)
+                break
             sftp = await ssh.sftp(self.machine)
             chunk = b""
             try:
