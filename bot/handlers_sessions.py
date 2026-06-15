@@ -180,6 +180,19 @@ async def cb_project_open(cb: CallbackQuery, db, ssh):
 
 # ---- opening a session ----
 
+async def _post_session_hints(bot, chat_id: int, thread_id: int):
+    """Right after a session opens, nudge the user toward the per-topic settings
+    worth applying first."""
+    await bot.send_message(
+        chat_id,
+        "💡 <b>Можно сразу настроить тему:</b>\n"
+        "• /confirm — режим с подтверждением (Claude сначала покажет план, "
+        "выполнит по кнопке «Выполнить»)\n"
+        "• /model — выбрать модель (opus / sonnet / haiku)",
+        message_thread_id=thread_id or None,
+    )
+
+
 async def _open_session(msg: Message, chat_type: str, user_id: int, db, ssh,
                         machine: dict, project: dict, session: dict | None):
     """Open a session and route the chat to the right place.
@@ -209,6 +222,7 @@ async def _open_session(msg: Message, chat_type: str, user_id: int, db, ssh,
                 chat_id, "🆕 Новая сессия. Напиши первое сообщение в этой теме.",
                 message_thread_id=thread_id or None,
             )
+        await _post_session_hints(bot, chat_id, thread_id)
         return
 
     forum_chat = await db.get_forum_chat(user_id)
@@ -243,6 +257,7 @@ async def _open_session(msg: Message, chat_type: str, user_id: int, db, ssh,
             forum_chat, "🆕 Новая сессия. Напиши первое сообщение в этой теме.",
             message_thread_id=thread_id,
         )
+    await _post_session_hints(bot, forum_chat, thread_id)
     await msg.edit_text(
         "✅ Открыл сессию отдельной темой в группе. Переходи туда — весь чат с Claude идёт там."
     )
