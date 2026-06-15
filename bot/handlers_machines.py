@@ -50,9 +50,9 @@ async def machines_view(db, user_id: int) -> tuple[str, object]:
             btn(label, f"m:sel:{m['id']}"),
             btn("📊", f"m:stat:{m['id']}"),
             btn(key_mark, f"m:key:{m['id']}"),
-            btn("🗑", f"m:del:{m['id']}"),
+            btn("🗑", f"m:del:{m['id']}", style="danger"),
         ])
-    rows.append([btn("➕ Добавить машину", "m:add")])
+    rows.append([btn("➕ Добавить машину", "m:add", style="primary")])
     rows.append([btn("⬅️ Меню", "menu:main")])
     return text, kb(rows)
 
@@ -126,7 +126,8 @@ async def cb_delete(cb: CallbackQuery, db):
         f"Удалить машину <b>{html.escape(machine['name'])}</b>? "
         "SSH-ключ будет стёрт из базы бота.",
         reply_markup=kb([
-            [btn("🗑 Да, удалить", f"m:delok:{machine_id}"), btn("✖️ Нет", "menu:machines")],
+            [btn("🗑 Да, удалить", f"m:delok:{machine_id}", style="danger"),
+             btn("✖️ Нет", "menu:machines")],
         ]),
     )
 
