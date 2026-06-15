@@ -214,6 +214,12 @@ bot/
 - Confirmation works at the plan level (`/confirm`: propose → execute), not as
   per-tool Allow/Deny prompts; the default remains bypass.
 
+## Roadmap
+
+Deferred ideas (live two-way session: in-chat option buttons, mid-task message
+injection) are parked in [BACKLOG.md](BACKLOG.md) — not scheduled, to keep the
+running bot stable.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
