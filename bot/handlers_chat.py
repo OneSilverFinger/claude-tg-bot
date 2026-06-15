@@ -439,7 +439,7 @@ async def _send_qa_screenshots(message, ssh, machine, cwd, since_mtime, exclude=
 # excluded so a code discussion doesn't dump source files.
 _FILE_RE = re.compile(
     r"(/?[\w.\-]+(?:/[\w.\-]+)*\.(?:png|jpe?g|gif|webp|svg|pdf|zip|tar|gz|tgz|"
-    r"csv|xlsx?|docx?|pptx?|mp4|mov|mp3|wav|log))\b",
+    r"csv|xlsx?|docx?|pptx?|md|txt|mp4|mov|mp3|wav|log))\b",
     re.IGNORECASE,
 )
 MAX_SEND_FILE = 20 * 1024 * 1024
