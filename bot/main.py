@@ -59,6 +59,9 @@ async def main():
     me = await bot.get_me()
     log.info("Starting bot @%s, %d whitelisted user(s)",
              me.username, len(config.allowed_user_ids))
+    # Re-attach to any runs that were in flight at the previous shutdown.
+    from . import recovery
+    await recovery.recover(bot, db, ssh)
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:

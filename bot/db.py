@@ -34,6 +34,21 @@ CREATE TABLE IF NOT EXISTS user_prefs(
   user_id INTEGER PRIMARY KEY,
   forum_chat_id INTEGER
 );
+
+-- In-flight detached runs, so a bot restart can re-attach or recover them.
+CREATE TABLE IF NOT EXISTS active_runs(
+  chat_id INTEGER NOT NULL,
+  thread_id INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  run_id TEXT NOT NULL,
+  machine_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  cwd TEXT NOT NULL,
+  session_id TEXT,
+  model TEXT,
+  started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (chat_id, thread_id)
+);
 """
 
 BINDING_FIELDS = {"machine_id", "cwd", "session_id", "model", "pending_files", "title", "user_id"}
@@ -154,3 +169,34 @@ class Database:
         )
         row = await cur.fetchone()
         return row["forum_chat_id"] if row else None
+
+    # ---- active runs (restart recovery) ----
+
+    async def add_active_run(self, chat_id: int, thread_id: int, message_id: int,
+                             run_id: str, machine_id: int, user_id: int, cwd: str,
+                             session_id: str | None, model: str | None) -> None:
+        await self._db.execute(
+            "INSERT OR REPLACE INTO active_runs"
+            "(chat_id, thread_id, message_id, run_id, machine_id, user_id, cwd, session_id, model) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (chat_id, thread_id, message_id, run_id, machine_id, user_id, cwd, session_id, model),
+        )
+        await self._db.commit()
+
+    async def update_active_run_session(self, chat_id: int, thread_id: int,
+                                        session_id: str) -> None:
+        await self._db.execute(
+            "UPDATE active_runs SET session_id=? WHERE chat_id=? AND thread_id=?",
+            (session_id, chat_id, thread_id),
+        )
+        await self._db.commit()
+
+    async def delete_active_run(self, chat_id: int, thread_id: int) -> None:
+        await self._db.execute(
+            "DELETE FROM active_runs WHERE chat_id=? AND thread_id=?", (chat_id, thread_id)
+        )
+        await self._db.commit()
+
+    async def list_active_runs(self) -> list[dict]:
+        cur = await self._db.execute("SELECT * FROM active_runs")
+        return [dict(r) for r in await cur.fetchall()]

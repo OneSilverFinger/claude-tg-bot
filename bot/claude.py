@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import shlex
+import uuid
 
 import asyncssh
 
@@ -13,6 +14,7 @@ log = logging.getLogger(__name__)
 
 PROJECTS_DIR = ".claude/projects"
 KEY_FILE = ".claude/.tg-anthropic-key"  # relative to remote home
+RUNS_DIR = ".claude/tg-runs"            # detached run artifacts, relative to home
 HEAD_BYTES = 65536
 TAIL_BYTES = 131072
 
@@ -355,23 +357,30 @@ async def session_tail(ssh, machine: dict, project_dir: str, session_id: str,
 
 
 class ClaudeRun:
-    """One non-interactive claude invocation over SSH with stream-json output."""
+    """One non-interactive claude invocation, launched *detached* on the remote.
 
-    def __init__(self, machine: dict, cwd: str, prompt: str,
+    The process is started under setsid with stdout/stderr redirected to files in
+    ~/.claude/tg-runs/, so it survives the SSH channel closing (i.e. a bot
+    restart). The bot follows the output file by polling, which means an
+    interrupted run can be re-attached after a restart from the same run_id.
+    """
+
+    def __init__(self, machine: dict, cwd: str, prompt: str = "",
                  resume_id: str | None = None, new_session_id: str | None = None,
-                 model: str | None = None):
+                 model: str | None = None, run_id: str | None = None):
         self.machine = machine
         self.cwd = cwd
         self.prompt = prompt
         self.resume_id = resume_id
         self.new_session_id = new_session_id
         self.model = model
+        self.run_id = run_id or uuid.uuid4().hex
         self.session_id = resume_id or new_session_id
-        self.process: asyncssh.SSHClientProcess | None = None
         self.stopped = False
         self.stderr = ""
+        self.result: dict | None = None
 
-    def _command(self) -> str:
+    def _runner_script(self) -> str:
         parts = [
             "claude", "-p",
             "--output-format", "stream-json", "--verbose",
@@ -384,95 +393,133 @@ class ClaudeRun:
         elif self.new_session_id:
             parts += ["--session-id", self.new_session_id]
         claude_cmd = " ".join(shlex.quote(p) for p in parts)
-        # Source the bot-managed key file if present, so a server that lost its
-        # interactive login still authenticates. No-op when the file is absent.
-        load_key = f"if [ -f ~/{KEY_FILE} ]; then set -a; . ~/{KEY_FILE}; set +a; fi"
-        inner = f"cd {shlex.quote(self.cwd)} && {load_key}; {claude_cmd}"
-        return login_shell(inner)
+        rd = "$HOME/" + RUNS_DIR
+        rid = self.run_id
+        return (
+            "#!/bin/bash\n"
+            f'if [ -f "$HOME/{KEY_FILE}" ]; then set -a; . "$HOME/{KEY_FILE}"; set +a; fi\n'
+            f"cd {shlex.quote(self.cwd)} || exit 1\n"
+            f'{claude_cmd} < "{rd}/{rid}.prompt" > "{rd}/{rid}.out" 2> "{rd}/{rid}.err"\n'
+            f'echo $? > "{rd}/{rid}.rc"\n'
+        )
+
+    async def launch(self, ssh) -> None:
+        """Write prompt + runner to the remote and start it detached."""
+        await ssh.run(self.machine, f"mkdir -p ~/{RUNS_DIR}", timeout=15)
+        sftp = await ssh.sftp(self.machine)
+        async with sftp.open(f"{RUNS_DIR}/{self.run_id}.prompt", "w") as f:
+            await f.write(self.prompt)
+        async with sftp.open(f"{RUNS_DIR}/{self.run_id}.sh", "w") as f:
+            await f.write(self._runner_script())
+        launch = (
+            f"setsid bash ~/{RUNS_DIR}/{self.run_id}.sh </dev/null >/dev/null 2>&1 & "
+            f"echo $! > ~/{RUNS_DIR}/{self.run_id}.pid"
+        )
+        await ssh.run(self.machine, login_shell(launch), timeout=20)
+
+    @staticmethod
+    async def _exists(sftp, path: str) -> bool:
+        try:
+            await sftp.stat(path)
+            return True
+        except Exception:
+            return False
+
+    async def _alive(self, ssh) -> bool:
+        try:
+            r = await ssh.run(
+                self.machine,
+                f"kill -0 $(cat ~/{RUNS_DIR}/{self.run_id}.pid 2>/dev/null) 2>/dev/null "
+                "&& echo y || echo n",
+                timeout=10,
+            )
+            return "y" in (r.stdout or "")
+        except Exception:
+            return True  # uncertain: don't abort the follow prematurely
+
+    async def follow(self, ssh, on_event) -> dict | None:
+        """Tail the run's output file, feeding stream-json events to on_event
+        until the process writes its return-code file (or dies). Idempotent:
+        re-attaching reads from the start and re-emits events."""
+        out_path = f"{RUNS_DIR}/{self.run_id}.out"
+        rc_path = f"{RUNS_DIR}/{self.run_id}.rc"
+        err_path = f"{RUNS_DIR}/{self.run_id}.err"
+        offset = 0
+        buf = ""
+        result = None
+        dead_checks = 0
+        while True:
+            sftp = await ssh.sftp(self.machine)
+            chunk = b""
+            try:
+                async with sftp.open(out_path, "rb") as f:
+                    await f.seek(offset)
+                    chunk = await f.read()
+            except Exception:
+                chunk = b""
+            if chunk:
+                offset += len(chunk)
+                buf += chunk.decode("utf-8", errors="replace")
+                lines = buf.split("\n")
+                buf = lines.pop()
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if event.get("type") == "system" and event.get("subtype") == "init":
+                        self.session_id = event.get("session_id") or self.session_id
+                    if event.get("type") == "result":
+                        result = event
+                    try:
+                        await on_event(event)
+                    except Exception:
+                        log.exception("on_event failed")
+
+            rc_done = await self._exists(sftp, rc_path)
+            if rc_done and not chunk:
+                break
+            if not rc_done:
+                if self.stopped:
+                    break
+                if not await self._alive(ssh):
+                    dead_checks += 1
+                    if dead_checks >= 2:
+                        break
+                else:
+                    dead_checks = 0
+            await asyncio.sleep(1.2)
+
+        try:
+            sftp = await ssh.sftp(self.machine)
+            async with sftp.open(err_path, "rb") as f:
+                self.stderr = (await f.read(8192)).decode("utf-8", errors="replace")
+        except Exception:
+            self.stderr = ""
+        self.result = result
+        return result
 
     async def execute(self, ssh, on_event) -> dict | None:
-        """Run claude, feeding every stream-json event to on_event.
+        await self.launch(ssh)
+        return await self.follow(ssh, on_event)
 
-        Returns the final "result" event, or None if the process died early.
-        """
-        cmd = self._command()
-        last_exc: Exception | None = None
-        for attempt in (1, 2):
-            conn = await ssh.connect(self.machine)
-            try:
-                self.process = await conn.create_process(
-                    cmd, encoding="utf-8", errors="replace"
-                )
-                break
-            except (OSError, asyncssh.Error) as e:
-                last_exc = e
-                ssh.drop(self.machine["id"])
-                if attempt == 2:
-                    raise
-        if self.process is None:
-            raise last_exc
-
-        proc = self.process
-        proc.stdin.write(self.prompt + "\n")
-        proc.stdin.write_eof()
-
-        err_chunks: list[str] = []
-
-        async def drain_stderr():
-            try:
-                async for line in proc.stderr:
-                    err_chunks.append(line)
-            except Exception:
-                pass
-
-        err_task = asyncio.create_task(drain_stderr())
-        result = None
+    async def cleanup(self, ssh) -> None:
         try:
-            async for line in proc.stdout:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except ValueError:
-                    continue
-                if event.get("type") == "system" and event.get("subtype") == "init":
-                    self.session_id = event.get("session_id") or self.session_id
-                if event.get("type") == "result":
-                    result = event
-                try:
-                    await on_event(event)
-                except Exception:
-                    log.exception("on_event failed")
-        finally:
-            err_task.cancel()
-            try:
-                await err_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self.stderr = "".join(err_chunks)
-        return result
+            await ssh.run(self.machine, f"rm -f ~/{RUNS_DIR}/{self.run_id}.*", timeout=10)
+        except Exception:
+            pass
 
     async def stop(self, ssh) -> None:
         self.stopped = True
-        proc = self.process
-        if proc is not None:
-            for action in (proc.terminate, proc.kill):
-                try:
-                    action()
-                except Exception:
-                    pass
-        if self.session_id:
-            try:
-                await ssh.run(
-                    self.machine,
-                    f"pkill -f {shlex.quote(self.session_id)} || true",
-                    timeout=10,
-                )
-            except Exception:
-                pass
-        if proc is not None:
-            try:
-                proc.close()
-            except Exception:
-                pass
+        try:
+            await ssh.run(
+                self.machine,
+                f"kill -TERM -- -$(cat ~/{RUNS_DIR}/{self.run_id}.pid 2>/dev/null) 2>/dev/null; "
+                f"pkill -f {shlex.quote(self.run_id)} 2>/dev/null || true",
+                timeout=10,
+            )
+        except Exception:
+            pass

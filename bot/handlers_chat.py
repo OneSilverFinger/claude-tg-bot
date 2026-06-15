@@ -225,6 +225,11 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
     status = await message.answer(
         "🤔 Claude думает...", reply_markup=stop_kb(),
     )
+    # Record the in-flight run so a bot restart can re-attach / recover it.
+    await db.add_active_run(
+        key[0], key[1], status.message_id, run.run_id, machine["id"],
+        message.from_user.id, binding["cwd"], run.session_id, binding.get("model"),
+    )
     editor = LiveEditor(message.bot, status.chat.id, status.message_id)
     transcript = Transcript()
     new_summary: list[str] = []
@@ -234,6 +239,11 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
         nonlocal last_event
         last_event = time.monotonic()
         transcript.feed(event)
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            sid = event.get("session_id")
+            if sid:
+                # Persist immediately so an interrupted *new* session stays linked.
+                await db.update_active_run_session(key[0], key[1], sid)
         if event.get("type") == "summary" and event.get("summary"):
             new_summary.append(event["summary"])
         elif event.get("type") in ("assistant", "user"):
@@ -315,6 +325,8 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
                 except (asyncio.CancelledError, Exception):
                     pass
         _ACTIVE.pop(key, None)
+        await db.delete_active_run(key[0], key[1])
+        await run.cleanup(ssh)
 
     # Persist the (possibly new) session id so the next message resumes it.
     if run.session_id and run.session_id != binding.get("session_id"):
@@ -332,7 +344,8 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
         except Exception:
             pass
 
-    await _finalize(message, editor, run, transcript, result, error, qa_run=qa_run)
+    await _finalize(message.bot, message.chat.id, message.message_thread_id,
+                    editor, run, transcript, result, error, qa_run=qa_run)
 
     if qa_run and not error and not run.stopped:
         # Final sweep for any shots the live feed didn't catch (already-sent
@@ -360,9 +373,8 @@ async def _send_qa_screenshots(message, ssh, machine, cwd, since_mtime, exclude=
             log.exception("sending qa screenshot %s failed", name)
 
 
-async def _finalize(message, editor, run, transcript, result, error, qa_run=False):
-    thread_id = message.message_thread_id
-
+async def _finalize(bot, chat_id, thread_id, editor, run, transcript, result, error,
+                    qa_run=False):
     if run.stopped:
         await editor.set("⏹ Остановлено.\n\n" + transcript.tail(2000))
         return
@@ -409,7 +421,7 @@ async def _finalize(message, editor, run, transcript, result, error, qa_run=Fals
 
     # Replace the live status with a short header, then post the full answer.
     await editor.set("✅ <b>Готово</b>" + meta, reply_markup=done_kb)
-    await send_long(message.bot, message.chat.id, answer, thread_id=thread_id)
+    await send_long(bot, chat_id, answer, thread_id=thread_id)
 
 
 def _meta_suffix(result: dict) -> str:
