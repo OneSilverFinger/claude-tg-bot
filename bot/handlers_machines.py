@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from . import claude
+from . import claude, machine_status
 from .keyboards import btn, kb
 
 log = logging.getLogger(__name__)
@@ -48,6 +48,7 @@ async def machines_view(db, user_id: int) -> tuple[str, object]:
         label = f"{mark}{m['name']} ({m['username']}@{m['host']})"
         rows.append([
             btn(label, f"m:sel:{m['id']}"),
+            btn("📊", f"m:stat:{m['id']}"),
             btn(key_mark, f"m:key:{m['id']}"),
             btn("🗑", f"m:del:{m['id']}"),
         ])
@@ -89,6 +90,25 @@ async def cb_select(cb: CallbackQuery, db):
         "Теперь выбери проект и сессию.",
         reply_markup=kb([
             [btn("📁 Проекты и сессии", "menu:projects")],
+            [btn("⬅️ Машины", "menu:machines")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("m:stat:"))
+async def cb_machine_status(cb: CallbackQuery, db, ssh):
+    machine_id = int(cb.data.split(":")[2])
+    machine = await db.machine(machine_id, cb.from_user.id)  # scoped to owner
+    if not machine:
+        await cb.answer("Машина не найдена", show_alert=True)
+        return
+    await cb.answer()
+    await cb.message.edit_text(f"⏳ Собираю статус <b>{html.escape(machine['name'])}</b>…")
+    data = await machine_status.collect(ssh, machine)
+    await cb.message.edit_text(
+        machine_status.render(machine, data),
+        reply_markup=kb([
+            [btn("🔄 Обновить", f"m:stat:{machine_id}")],
             [btn("⬅️ Машины", "menu:machines")],
         ]),
     )
