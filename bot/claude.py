@@ -367,7 +367,8 @@ class ClaudeRun:
 
     def __init__(self, machine: dict, cwd: str, prompt: str = "",
                  resume_id: str | None = None, new_session_id: str | None = None,
-                 model: str | None = None, run_id: str | None = None):
+                 model: str | None = None, run_id: str | None = None,
+                 permission_mode: str = "bypassPermissions"):
         self.machine = machine
         self.cwd = cwd
         self.prompt = prompt
@@ -375,6 +376,7 @@ class ClaudeRun:
         self.new_session_id = new_session_id
         self.model = model
         self.run_id = run_id or uuid.uuid4().hex
+        self.permission_mode = permission_mode
         self.session_id = resume_id or new_session_id
         self.stopped = False
         self.stderr = ""
@@ -384,7 +386,7 @@ class ClaudeRun:
         parts = [
             "claude", "-p",
             "--output-format", "stream-json", "--verbose",
-            "--permission-mode", "bypassPermissions",
+            "--permission-mode", self.permission_mode,
         ]
         if self.model:
             parts += ["--model", self.model]

@@ -13,7 +13,7 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from . import claude, qa, transcribe
-from .keyboards import stop_kb, test_kb
+from .keyboards import plan_kb, stop_kb, test_kb
 from .render import LiveEditor, Transcript, send_long
 
 log = logging.getLogger(__name__)
@@ -21,6 +21,9 @@ router = Router()
 
 # Active runs keyed by (chat_id, thread_id) so /stop and the inline button work.
 _ACTIVE: dict[tuple[int, int], claude.ClaudeRun] = {}
+
+# In confirm mode: prompt awaiting «Выполнить», keyed by (chat_id, thread_id).
+_PENDING_PLAN: dict[tuple[int, int], str] = {}
 
 UPLOAD_DIR = ".claude/tg-uploads"
 MAX_FILE = 20 * 1024 * 1024
@@ -185,6 +188,56 @@ async def cb_stop(cb: CallbackQuery, ssh):
     await cb.answer("Останавливаю...")
 
 
+# ---- confirm mode ----
+
+@router.message(Command("confirm"))
+async def cmd_confirm(message: Message, db):
+    if message.chat.type == "private":
+        await message.answer("Команда работает в теме сессии, а не в личном чате.")
+        return
+    key = _key(message)
+    binding = await db.get_binding(*key)
+    if not binding or not binding.get("machine_id"):
+        await message.answer("Сначала открой сессию в этой теме (/menu).")
+        return
+    new = 0 if binding.get("confirm_mode") else 1
+    await db.upsert_binding(*key, binding["user_id"], confirm_mode=new)
+    if new:
+        await message.answer(
+            "🔒 <b>Режим с подтверждением ВКЛ</b>\nТеперь я сначала покажу план "
+            "(ничего не меняя), а выполню только после кнопки «✅ Выполнить»."
+        )
+    else:
+        _PENDING_PLAN.pop(key, None)
+        await message.answer("⚡ <b>Режим с подтверждением ВЫКЛ</b>\nВыполняю сразу, как обычно.")
+
+
+@router.callback_query(F.data == "plan:exec")
+async def cb_plan_exec(cb: CallbackQuery, db, ssh):
+    key = (cb.message.chat.id, cb.message.message_thread_id or 0)
+    prompt = _PENDING_PLAN.pop(key, None)
+    if not prompt:
+        await cb.answer("Нет плана к выполнению", show_alert=True)
+        return
+    await cb.answer("Выполняю…")
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await _run_prompt(cb.message, db, ssh, prompt, force_execute=True)
+
+
+@router.callback_query(F.data == "plan:cancel")
+async def cb_plan_cancel(cb: CallbackQuery):
+    key = (cb.message.chat.id, cb.message.message_thread_id or 0)
+    _PENDING_PLAN.pop(key, None)
+    await cb.answer("Отменено")
+    try:
+        await cb.message.edit_text("✖️ План отменён. Напиши, что поправить.")
+    except Exception:
+        pass
+
+
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(message: Message, db, ssh):
     if message.chat.type == "private":
@@ -193,7 +246,8 @@ async def on_text(message: Message, db, ssh):
     await _run_prompt(message, db, ssh, message.text.strip())
 
 
-async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = False):
+async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = False,
+                      force_execute: bool = False):
     key = _key(message)
     if key in _ACTIVE:
         await message.answer(
@@ -206,6 +260,9 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
         return
 
     qa_since = time.time() if qa_run else 0.0
+    # Confirm mode: first show a plan (read-only), execute only after «Выполнить».
+    plan_mode = bool(binding.get("confirm_mode")) and not qa_run and not force_execute
+    permission_mode = "plan" if plan_mode else "bypassPermissions"
 
     pending = json.loads(binding.get("pending_files") or "[]")
     if pending:
@@ -221,6 +278,7 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
         prompt=prompt,
         resume_id=binding.get("session_id"),
         model=binding.get("model"),
+        permission_mode=permission_mode,
     )
     _ACTIVE[key] = run
 
@@ -347,7 +405,8 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
             pass
 
     await _finalize(message.bot, ssh, message.chat.id, message.message_thread_id,
-                    editor, run, transcript, result, error, qa_run=qa_run)
+                    editor, run, transcript, result, error, qa_run=qa_run,
+                    plan_mode=plan_mode, prompt=prompt)
 
     if qa_run and not error and not run.stopped:
         # Final sweep for any shots the live feed didn't catch (already-sent
@@ -429,7 +488,7 @@ async def _send_referenced_files(bot, ssh, machine, cwd, chat_id, thread_id, tex
 
 
 async def _finalize(bot, ssh, chat_id, thread_id, editor, run, transcript, result, error,
-                    qa_run=False):
+                    qa_run=False, plan_mode=False, prompt=None):
     if run.stopped:
         await editor.set("⏹ Остановлено.\n\n" + transcript.tail(2000))
         return
@@ -466,6 +525,16 @@ async def _finalize(bot, ssh, chat_id, thread_id, editor, run, transcript, resul
 
     answer = (result.get("result") or "").strip()
     meta = _meta_suffix(result)
+
+    if plan_mode:
+        # Confirm mode: this was a read-only plan. Show it + «Выполнить»/«Отмена».
+        _PENDING_PLAN[(chat_id, thread_id)] = prompt
+        await editor.set("📋 <b>План готов — подтверди выполнение</b>" + meta,
+                         reply_markup=plan_kb())
+        if answer:
+            await send_long(bot, chat_id, answer, thread_id=thread_id)
+        return
+
     # Offer one-tap QA after a normal run; skip it on the QA run itself.
     done_kb = None if qa_run else test_kb()
 

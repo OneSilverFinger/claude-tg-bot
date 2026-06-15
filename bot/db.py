@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS bindings(
   model TEXT,
   pending_files TEXT NOT NULL DEFAULT '[]',
   title TEXT,
+  confirm_mode INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (chat_id, thread_id)
 );
 
@@ -51,7 +52,8 @@ CREATE TABLE IF NOT EXISTS active_runs(
 );
 """
 
-BINDING_FIELDS = {"machine_id", "cwd", "session_id", "model", "pending_files", "title", "user_id"}
+BINDING_FIELDS = {"machine_id", "cwd", "session_id", "model", "pending_files", "title",
+                  "confirm_mode", "user_id"}
 
 
 class Database:
@@ -72,6 +74,12 @@ class Database:
         cols = {r["name"] for r in await cur.fetchall()}
         if "claude_key_enc" not in cols:
             await self._db.execute("ALTER TABLE machines ADD COLUMN claude_key_enc TEXT")
+        cur = await self._db.execute("PRAGMA table_info(bindings)")
+        bcols = {r["name"] for r in await cur.fetchall()}
+        if "confirm_mode" not in bcols:
+            await self._db.execute(
+                "ALTER TABLE bindings ADD COLUMN confirm_mode INTEGER NOT NULL DEFAULT 0"
+            )
 
     async def close(self) -> None:
         if self._db is not None:

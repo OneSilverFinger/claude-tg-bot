@@ -31,5 +31,10 @@ def test_kb() -> InlineKeyboardMarkup:
     return kb([[btn("🧪 Протестировать", "qa:run", style="success")]])
 
 
+def plan_kb() -> InlineKeyboardMarkup:
+    return kb([[btn("✅ Выполнить", "plan:exec", style="success"),
+               btn("✖️ Отмена", "plan:cancel", style="danger")]])
+
+
 def back_kb(data: str = "menu:main") -> InlineKeyboardMarkup:
     return kb([[btn("⬅️ Назад", data)]])
