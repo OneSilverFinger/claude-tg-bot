@@ -38,9 +38,24 @@ never talks to Claude — it is only the control panel.
 - Voice and video notes are transcribed (any OpenAI-compatible Whisper endpoint —
   Groq / OpenAI / local) and sent to Claude as the prompt. Optional, off until
   `STT_API_KEY` is set.
-- "Stop" button and `/stop` command.
+- **Confirmation mode** (`/confirm`, per topic): Claude first proposes a plan
+  (read-only, no changes), and you execute it with one tap. Off by default —
+  the bot runs immediately as usual.
+- **Independent manual QA** (`/test` or the 🧪 button): the agent derives a test
+  plan, installs Playwright on demand, and launches a separate tester that drives
+  a headless browser — screenshots and step-by-step progress stream into the topic
+  live, then a PASS/FAIL report. Say "fix it" and the agent fixes with full test
+  context.
+- **Auto-send referenced files**: if Claude's answer points at a real deliverable
+  file (image, pdf, archive, csv, doc…), the bot sends the actual file.
+- **Per-machine status** (📊 in `/machines`): connectivity, Claude version/auth,
+  disk/RAM/load, and consumed Claude usage (tokens over 5h / today / total).
+- **Survives restarts**: runs are launched detached on the remote, so a bot
+  restart doesn't kill them — on startup the bot re-attaches and delivers the
+  result; the session context is preserved either way.
+- Coloured action buttons (Bot API styles), "Stop" button and `/stop` command.
 - Restore Claude's authorization on the server through the bot (see below).
-- Telegram-ID whitelist.
+- Telegram-ID whitelist; each user is isolated (own machines and sessions).
 
 ## Why a group with topics
 
@@ -141,6 +156,8 @@ and survives rebuilds. To update: `git pull && docker compose up -d --build`.
 
 - `/sessions` — switch the project/session for this topic.
 - `/model` — choose the model for this topic.
+- `/confirm` — toggle confirmation mode (plan → execute) for this topic.
+- `/test` — run an independent manual-QA pass on what was built.
 - `/status` — what is currently bound to the topic.
 - `/stop` — stop the current Claude run.
 - `/unbind` — detach the topic from its session (the session on the server is
@@ -168,14 +185,19 @@ bot/
   db.py                SQLite: machines, chat→session bindings, prefs
   access.py            whitelist middleware
   ssh.py               SSH connection pool (asyncssh), machine test
-  claude.py            run claude, parse stream-json, session lists, recap, install
+  claude.py            run claude (detached + follow), stream-json, sessions, recap, install
+  transcribe.py        voice/video-note transcription (OpenAI-compatible STT)
+  qa.py                independent QA: install Playwright, orchestration, screenshots
+  machine_status.py    per-machine status: health + consumed Claude usage
+  recovery.py          re-attach to in-flight runs after a restart
   render.py            stream-json → messages, live-edit, markdown→HTML, chunking
-  keyboards.py         inline keyboards
+  keyboards.py         inline keyboards (with Bot API button styles)
   handlers_menu.py     /start, /menu, model, status, /bindgroup
-  handlers_machines.py add/select/delete machines (FSM), install Claude
+  handlers_machines.py add/select/delete machines (FSM), install Claude, 📊 status
   handlers_sessions.py projects, sessions, recap, opening a topic
-  handlers_chat.py     main dialog, files, /stop
-  main.py              app assembly and polling
+  handlers_qa.py       /test and the 🧪 QA flow
+  handlers_chat.py     main dialog, files, voice, /stop, /confirm, file auto-send
+  main.py              app assembly, restart recovery, polling
 ```
 
 ## Known limitations
@@ -189,8 +211,8 @@ bot/
 - Group auto-binding triggers on the bot's rights event. If "Topics" were enabled
   after rights were granted, the event does not repeat — just send `/bindgroup`
   in the group.
-- In-chat permission buttons (Allow/Deny) are a v2 candidate; the current mode is
-  bypass.
+- Confirmation works at the plan level (`/confirm`: propose → execute), not as
+  per-tool Allow/Deny prompts; the default remains bypass.
 
 ## License
 
