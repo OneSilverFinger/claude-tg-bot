@@ -3,6 +3,7 @@ import html
 import io
 import json
 import logging
+import posixpath
 import re
 import shlex
 import time
@@ -389,23 +390,23 @@ async def _send_referenced_files(bot, ssh, machine, cwd, chat_id, thread_id, tex
     """If the answer references existing deliverable files, send them as documents."""
     if not text:
         return
-    seen, cands = set(), []
-    for m in _FILE_RE.finditer(text):
-        p = m.group(1)
-        if p not in seen:
-            seen.add(p)
-            cands.append(p)
+    cands = [m.group(1) for m in _FILE_RE.finditer(text)]
     if not cands:
         return
     try:
         sftp = await ssh.sftp(machine)
     except Exception:
         return
-    sent = 0
+    sent, done = 0, set()
     for p in cands:
         if sent >= 5:
             break
         abspath = p if p.startswith("/") else f"{cwd.rstrip('/')}/{p}"
+        abspath = posixpath.normpath(abspath)
+        # Same file referenced more than once (e.g. absolute + relative) → send once.
+        if abspath in done:
+            continue
+        done.add(abspath)
         try:
             st = await sftp.stat(abspath)
             size = st.size or 0
