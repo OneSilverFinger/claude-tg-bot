@@ -39,6 +39,42 @@ def _key(message: Message) -> tuple[int, int]:
     return message.chat.id, message.message_thread_id or 0
 
 
+# Common secret/token shapes. If a chat message matches, the bot deletes it and
+# posts a redacted notice, but still passes the full original to the agent.
+_SECRET_PATTERNS = [
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z0-9 ]*PRIVATE KEY-----"),
+    re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"\bsk-[A-Za-z0-9]{20,}"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}"),
+    re.compile(r"\bgsk_[A-Za-z0-9]{30,}"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"\b[ps]k_(?:live|test)_[A-Za-z0-9]{16,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),  # JWT
+    re.compile(r"\bperm[-:][A-Za-z0-9._=\-]{20,}"),                                # YouTrack
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/\-]{20,}=*"),
+    re.compile(r"(?i)\b(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)"
+               r"\s*[:=]\s*\S{6,}"),
+]
+
+
+def _redact_secrets(text: str) -> tuple[str, bool]:
+    """Return (redacted_text, found). Found secrets become a placeholder."""
+    found = False
+
+    def repl(_m):
+        nonlocal found
+        found = True
+        return "•••[скрыто]•••"
+
+    out = text
+    for pat in _SECRET_PATTERNS:
+        out = pat.sub(repl, out)
+    return out, found
+
+
 async def _need_binding(message: Message, db):
     binding = await db.get_binding(*_key(message))
     if not binding or not binding.get("machine_id") or not binding.get("cwd"):
@@ -243,7 +279,20 @@ async def on_text(message: Message, db, ssh):
     if message.chat.type == "private":
         await message.answer(PRIVATE_REDIRECT)
         return
-    await _run_prompt(message, db, ssh, message.text.strip())
+    text = message.text.strip()
+    redacted, has_secret = _redact_secrets(text)
+    if has_secret:
+        # Wipe the secret from the chat, but still pass the full text to the agent.
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await message.answer(
+            "🔒 <b>Заметил креды — скрыл их и удалил сообщение.</b>\n"
+            "Агенту передано в полном виде. Видимая версия:\n\n"
+            + html.escape(redacted[:3500])
+        )
+    await _run_prompt(message, db, ssh, text)
 
 
 async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = False,
