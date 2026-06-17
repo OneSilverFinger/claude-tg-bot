@@ -60,6 +60,18 @@ _SECRET_PATTERNS = [
 ]
 
 
+_GENERIC_TOKEN = re.compile(r"[A-Za-z0-9_\-]{25,}")
+_REDACTED = "•••[скрыто]•••"
+
+
+def _looks_like_token(tok: str) -> bool:
+    """High-entropy heuristic: long mixed-case alnum (upper+lower+digit). Catches
+    prefix-less tokens while skipping prose, lowercase slugs and hex hashes."""
+    return (any(c.isupper() for c in tok)
+            and any(c.islower() for c in tok)
+            and any(c.isdigit() for c in tok))
+
+
 def _redact_secrets(text: str) -> tuple[str, bool]:
     """Return (redacted_text, found). Found secrets become a placeholder."""
     found = False
@@ -67,11 +79,22 @@ def _redact_secrets(text: str) -> tuple[str, bool]:
     def repl(_m):
         nonlocal found
         found = True
-        return "•••[скрыто]•••"
+        return _REDACTED
 
     out = text
     for pat in _SECRET_PATTERNS:
         out = pat.sub(repl, out)
+
+    # Catch-all for prefix-less tokens.
+    def generic_repl(m):
+        nonlocal found
+        tok = m.group(0)
+        if _looks_like_token(tok):
+            found = True
+            return _REDACTED
+        return tok
+
+    out = _GENERIC_TOKEN.sub(generic_repl, out)
     return out, found
 
 
