@@ -39,3 +39,33 @@ restarts (`bot/claude.py` `ClaudeRun` + `bot/recovery.py`).
 **Decision (2026-06-15):** parked. The bot is in production with real users and
 this rework touches the just-hardened run/recovery core — the regression risk
 isn't worth it without a concrete need.
+
+---
+
+## 3. Localization (EN + KO)
+All user-facing text is currently hardcoded Russian. Add English and Korean while
+keeping Russian as the default (the production bot must stay RU, byte-identical).
+
+Scope: ~250-300 user-facing strings across all `handlers_*`, `keyboards.py`,
+`machine_status.py`, `access.py`. Agent-facing prompts (the QA orchestration in
+`bot/qa.py`, internal instructions in `bot/claude.py`) stay RU — Claude reads
+them, not the user.
+
+**Proposed approach (prod-safe by design):**
+- `bot/i18n.py`: `T[key] = {"ru":…, "en":…, "ko":…}` + `t(key, lang)` that falls
+  back to RU. RU values = exact current strings.
+- Default lang `ru`; per-user `user_prefs.lang` (migration), a `/lang ru|en|ko`
+  command (+ menu button); resolve lang via middleware from `from_user` (in group
+  topics: the binding owner's lang).
+- Replace inline literals with `t('key', lang)`. EN/KO are additive; any missing
+  key falls back to RU — so RU stays identical at every step.
+- Do it on a branch, in batches (menu → sessions → machines → chat/statuses → QA),
+  verifying RU is unchanged after each; merge only when complete.
+
+**Open questions:** Korean needs a native-speaker review for production quality
+(my translation is a first pass).
+
+**Decision (2026-06-17):** parked at user's request. Big multi-file refactor;
+no urgency yet (only RU users active). Safe to pick up anytime — the RU-fallback
+design means it can't regress the production bot.
+
