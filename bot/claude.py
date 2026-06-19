@@ -408,11 +408,21 @@ class ClaudeRun:
     async def launch(self, ssh) -> None:
         """Write prompt + runner to the remote and start it detached."""
         await ssh.run(self.machine, f"mkdir -p ~/{RUNS_DIR}", timeout=15)
-        sftp = await ssh.sftp(self.machine)
-        async with sftp.open(f"{RUNS_DIR}/{self.run_id}.prompt", "w") as f:
-            await f.write(self.prompt)
-        async with sftp.open(f"{RUNS_DIR}/{self.run_id}.sh", "w") as f:
-            await f.write(self._runner_script())
+        # Write prompt + runner, retrying once if the connection blips mid-write
+        # (a single SFTP drop must not kill the whole run). Idempotent: both files
+        # are overwritten, and the detached process is only spawned after.
+        for attempt in (1, 2):
+            try:
+                sftp = await ssh.sftp(self.machine)
+                async with sftp.open(f"{RUNS_DIR}/{self.run_id}.prompt", "w") as f:
+                    await f.write(self.prompt)
+                async with sftp.open(f"{RUNS_DIR}/{self.run_id}.sh", "w") as f:
+                    await f.write(self._runner_script())
+                break
+            except (OSError, asyncssh.Error):
+                ssh.drop(self.machine["id"])
+                if attempt == 2:
+                    raise
         launch = (
             f"setsid bash ~/{RUNS_DIR}/{self.run_id}.sh </dev/null >/dev/null 2>&1 & "
             f"echo $! > ~/{RUNS_DIR}/{self.run_id}.pid"
