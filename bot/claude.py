@@ -452,19 +452,30 @@ class ClaudeRun:
         dead_checks = 0
         polls = 0
         max_polls = 1800  # ~36 min hard cap so a wedged run can't hang forever
+        # Reuse ONE SFTP channel for the whole follow loop. Opening a fresh one
+        # every poll leaks channels and exhausts the server's MaxSessions
+        # (→ reconnect churn and intermittent "Connection closed").
+        sftp = None
         while True:
             polls += 1
             if polls > max_polls:
                 log.warning("follow: hard cap reached for run %s", self.run_id)
                 break
-            sftp = await ssh.sftp(self.machine)
+            if sftp is None:
+                try:
+                    sftp = await ssh.sftp(self.machine)
+                except Exception:
+                    await asyncio.sleep(1.2)
+                    continue
             chunk = b""
             try:
                 async with sftp.open(out_path, "rb") as f:
                     await f.seek(offset)
                     chunk = await f.read()
+            except asyncssh.SFTPError:
+                chunk = b""           # file not there yet — client still fine
             except Exception:
-                chunk = b""
+                sftp = None           # connection/channel died — reopen next poll
             if chunk:
                 offset += len(chunk)
                 buf += chunk.decode("utf-8", errors="replace")
@@ -487,7 +498,7 @@ class ClaudeRun:
                     except Exception:
                         log.exception("on_event failed")
 
-            rc_done = await self._exists(sftp, rc_path)
+            rc_done = await self._exists(sftp, rc_path) if sftp is not None else False
             if rc_done and not chunk:
                 break
             if not rc_done:
@@ -502,11 +513,18 @@ class ClaudeRun:
             await asyncio.sleep(1.2)
 
         try:
-            sftp = await ssh.sftp(self.machine)
+            if sftp is None:
+                sftp = await ssh.sftp(self.machine)
             async with sftp.open(err_path, "rb") as f:
                 self.stderr = (await f.read(8192)).decode("utf-8", errors="replace")
         except Exception:
             self.stderr = ""
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.exit()
+                except Exception:
+                    pass
         self.result = result
         return result
 
