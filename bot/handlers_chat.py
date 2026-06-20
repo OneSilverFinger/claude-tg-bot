@@ -442,10 +442,35 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
     result = None
     error = None
     try:
-        result = await run.execute(ssh, on_event)
-    except Exception as e:
-        log.exception("claude run failed")
-        error = str(e)
+        for attempt in (1, 2):
+            result = None
+            error = None
+            try:
+                result = await run.execute(ssh, on_event)
+            except Exception as e:
+                log.exception("claude run failed (attempt %d)", attempt)
+                error = str(e)
+            # Retry ONLY an early failure that produced no output — safe, the
+            # agent did nothing to duplicate. Never retry after work was streamed
+            # or the user stopped it.
+            failed = bool(error) or result is None or bool(result.get("is_error"))
+            if failed and not run.stopped and not transcript.blocks and attempt < 2:
+                await run.cleanup(ssh)
+                await editor.set("⚠️ Сбой на старте, повторяю…", reply_markup=stop_kb())
+                await asyncio.sleep(3)
+                run = claude.ClaudeRun(
+                    machine=machine, cwd=binding["cwd"], prompt=prompt,
+                    resume_id=binding.get("session_id"), model=binding.get("model"),
+                    permission_mode=permission_mode,
+                )
+                _ACTIVE[key] = run
+                await db.add_active_run(
+                    key[0], key[1], status.message_id, run.run_id, machine["id"],
+                    message.from_user.id, binding["cwd"], run.session_id,
+                    binding.get("model"),
+                )
+                continue
+            break
     finally:
         hb_task.cancel()
         if qa_task:
