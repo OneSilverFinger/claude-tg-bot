@@ -400,6 +400,9 @@ class ClaudeRun:
         return (
             "#!/bin/bash\n"
             f'if [ -f "$HOME/{KEY_FILE}" ]; then set -a; . "$HOME/{KEY_FILE}"; set +a; fi\n'
+            # claude refuses --dangerously-skip-permissions as root unless this is
+            # set; mark root sessions as sandboxed so bypassPermissions works.
+            '[ "$(id -u)" = "0" ] && export IS_SANDBOX=1\n'
             f"cd {shlex.quote(self.cwd)} || exit 1\n"
             f'{claude_cmd} < "{rd}/{rid}.prompt" > "{rd}/{rid}.out" 2> "{rd}/{rid}.err"\n'
             f'echo $? > "{rd}/{rid}.rc"\n'
