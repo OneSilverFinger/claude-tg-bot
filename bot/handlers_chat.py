@@ -331,6 +331,22 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
     if not machine:
         return
 
+    # Pre-flight: a missing working dir makes claude die with a confusing
+    # "no response" — check first and say what's actually wrong.
+    try:
+        chk = await ssh.run(
+            machine, f"test -d {shlex.quote(binding['cwd'])} && echo ok", timeout=15
+        )
+        if "ok" not in (chk.stdout or ""):
+            await message.answer(
+                "📁 Рабочая папка не найдена на сервере:\n"
+                f"<code>{html.escape(binding['cwd'])}</code>\n\n"
+                "Проверь путь: /sessions → «Ввести путь вручную» (или создай папку)."
+            )
+            return
+    except Exception:
+        pass  # connectivity problems are handled by the run itself
+
     qa_since = time.time() if qa_run else 0.0
     # Confirm mode: first show a plan (read-only), execute only after «Выполнить».
     plan_mode = bool(binding.get("confirm_mode")) and not qa_run and not force_execute
