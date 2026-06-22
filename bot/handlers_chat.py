@@ -331,19 +331,20 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
     if not machine:
         return
 
-    # Pre-flight: a missing working dir makes claude die with a confusing
-    # "no response" — check first and say what's actually wrong.
+    # Pre-flight: ensure the working dir exists (create it if missing) — otherwise
+    # `cd` in the runner fails and the run dies with a confusing "no response".
     try:
-        chk = await ssh.run(
-            machine, f"test -d {shlex.quote(binding['cwd'])} && echo ok", timeout=15
+        q = shlex.quote(binding["cwd"])
+        res = await ssh.run(
+            machine,
+            f"if [ -d {q} ]; then echo exists; else mkdir -p {q} && echo created; fi",
+            timeout=15,
         )
-        if "ok" not in (chk.stdout or ""):
+        if "created" in (res.stdout or ""):
             await message.answer(
-                "📁 Рабочая папка не найдена на сервере:\n"
-                f"<code>{html.escape(binding['cwd'])}</code>\n\n"
-                "Проверь путь: /sessions → «Ввести путь вручную» (или создай папку)."
+                "📁 Рабочей папки не было — создал:\n"
+                f"<code>{html.escape(binding['cwd'])}</code>"
             )
-            return
     except Exception:
         pass  # connectivity problems are handled by the run itself
 
