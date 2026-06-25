@@ -36,6 +36,14 @@ CREATE TABLE IF NOT EXISTS user_prefs(
   forum_chat_id INTEGER
 );
 
+-- A user can connect several forum groups; sessions can open in any of them.
+CREATE TABLE IF NOT EXISTS user_groups(
+  user_id INTEGER NOT NULL,
+  chat_id INTEGER NOT NULL,
+  title TEXT,
+  PRIMARY KEY (user_id, chat_id)
+);
+
 -- In-flight detached runs, so a bot restart can re-attach or recover them.
 CREATE TABLE IF NOT EXISTS active_runs(
   chat_id INTEGER NOT NULL,
@@ -80,6 +88,11 @@ class Database:
             await self._db.execute(
                 "ALTER TABLE bindings ADD COLUMN confirm_mode INTEGER NOT NULL DEFAULT 0"
             )
+        # Backfill the multi-group table from the legacy single forum group.
+        await self._db.execute(
+            "INSERT OR IGNORE INTO user_groups(user_id, chat_id) "
+            "SELECT user_id, forum_chat_id FROM user_prefs WHERE forum_chat_id IS NOT NULL"
+        )
 
     async def close(self) -> None:
         if self._db is not None:
@@ -177,6 +190,42 @@ class Database:
         )
         row = await cur.fetchone()
         return row["forum_chat_id"] if row else None
+
+    # ---- multiple forum groups per user ----
+
+    async def add_user_group(self, user_id: int, chat_id: int, title: str | None) -> None:
+        await self._db.execute(
+            "INSERT INTO user_groups(user_id, chat_id, title) VALUES(?,?,?) "
+            "ON CONFLICT(user_id, chat_id) DO UPDATE SET title=excluded.title",
+            (user_id, chat_id, title),
+        )
+        await self._db.commit()
+        # Keep the legacy single field as the most-recent group (back-compat).
+        await self.set_forum_chat(user_id, chat_id)
+
+    async def remove_user_group(self, user_id: int, chat_id: int) -> None:
+        await self._db.execute(
+            "DELETE FROM user_groups WHERE user_id=? AND chat_id=?", (user_id, chat_id)
+        )
+        await self._db.commit()
+        if await self.get_forum_chat(user_id) == chat_id:
+            cur = await self._db.execute(
+                "SELECT chat_id FROM user_groups WHERE user_id=? ORDER BY rowid LIMIT 1",
+                (user_id,),
+            )
+            row = await cur.fetchone()
+            await self.set_forum_chat(user_id, row["chat_id"] if row else None)
+
+    async def list_user_groups(self, user_id: int) -> list[dict]:
+        cur = await self._db.execute(
+            "SELECT chat_id, title FROM user_groups WHERE user_id=? ORDER BY rowid",
+            (user_id,),
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+        if rows:
+            return rows
+        fc = await self.get_forum_chat(user_id)  # legacy fallback
+        return [{"chat_id": fc, "title": None}] if fc else []
 
     # ---- active runs (restart recovery) ----
 

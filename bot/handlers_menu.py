@@ -95,9 +95,8 @@ async def on_my_chat_member(update: ChatMemberUpdated, db):
     bot = update.bot
 
     if status in ("left", "kicked"):
-        # If this was someone's working group, forget it.
-        if await db.get_forum_chat(actor.id) == chat.id:
-            await db.set_forum_chat(actor.id, None)
+        # Forget this group for the user who had it connected.
+        await db.remove_user_group(actor.id, chat.id)
         return
 
     if status not in ("administrator", "member"):
@@ -116,11 +115,12 @@ async def on_my_chat_member(update: ChatMemberUpdated, db):
     )
 
     if is_forum and can_manage:
-        await db.set_forum_chat(actor.id, chat.id)
+        await db.add_user_group(actor.id, chat.id, chat.title)
         await bot.send_message(
             chat.id,
             "✅ <b>Группа подключена.</b>\n"
-            "Теперь в личном чате выбирай сессии — каждая откроется здесь отдельной темой.",
+            "Теперь в личном чате выбирай сессии — каждая откроется отдельной темой. "
+            "Если у тебя несколько групп, при открытии сессии бот спросит, в какую.",
         )
     elif is_forum and status == "administrator":
         await bot.send_message(
@@ -224,9 +224,9 @@ async def status_text(db, chat_id: int, thread_id: int, user_id: int) -> str:
     else:
         lines.append("💬 новая сессия (создастся при первом сообщении)")
     lines.append(f"🧠 модель: {binding.get('model') or 'по умолчанию'}")
-    forum = await db.get_forum_chat(user_id)
-    if forum:
-        lines.append("🧵 группа с темами подключена")
+    groups = await db.list_user_groups(user_id)
+    if groups:
+        lines.append(f"🧵 подключённых групп: {len(groups)}")
     return "\n".join(lines)
 
 
@@ -261,10 +261,10 @@ async def cmd_bindgroup(message: Message, db):
             "(группа должна быть супергруппой) и отправь /bindgroup ещё раз."
         )
         return
-    await db.set_forum_chat(message.from_user.id, message.chat.id)
+    await db.add_user_group(message.from_user.id, message.chat.id, message.chat.title)
     await message.answer(
         "✅ Группа привязана. Теперь выбирай сессии в личном чате с ботом — "
-        "каждая откроется здесь отдельной темой."
+        "каждая откроется отдельной темой. При нескольких группах бот спросит, в какую."
     )
 
 

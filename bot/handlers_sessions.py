@@ -17,6 +17,8 @@ router = Router()
 # In-memory caches so callback_data stays short; rebuilt on each list view.
 _PROJECT_CACHE: dict[tuple[int, int], list[dict]] = {}
 _SESSION_CACHE: dict[tuple[int, int], list[dict]] = {}
+# Pending session-open awaiting a group choice (>1 group), keyed by user_id.
+_PENDING_OPEN: dict[int, tuple] = {}
 
 NO_GROUP = (
     "🧵 <b>Нужна рабочая группа</b>\n\n"
@@ -225,16 +227,33 @@ async def _open_session(msg: Message, chat_type: str, user_id: int, db, ssh,
         await _post_session_hints(bot, chat_id, thread_id)
         return
 
-    forum_chat = await db.get_forum_chat(user_id)
-    if not forum_chat:
+    groups = await db.list_user_groups(user_id)
+    if not groups:
         await msg.edit_text(NO_GROUP, reply_markup=kb([[btn("⬅️ Меню", "menu:main")]]))
         return
+    if len(groups) == 1:
+        await _create_session_topic(
+            bot, db, ssh, user_id, groups[0]["chat_id"],
+            machine, cwd, session_id, title, project_dir, msg,
+        )
+        return
+    # Several groups connected → ask which one to open the session in.
+    _PENDING_OPEN[user_id] = (machine, cwd, session_id, title, project_dir)
+    rows = [[btn(g.get("title") or f"группа {g['chat_id']}", f"g:open:{i}")]
+            for i, g in enumerate(groups)]
+    rows.append([btn("✖️ Отмена", "menu:main")])
+    await msg.edit_text("🧵 В какую группу открыть сессию?", reply_markup=kb(rows))
 
+
+async def _create_session_topic(bot, db, ssh, user_id: int, forum_chat: int,
+                                machine: dict, cwd: str, session_id, title,
+                                project_dir, src_msg: Message):
+    """Create a forum topic in the chosen group, bind the session, post recap+hints."""
     name = trunc(f"{machine['name']}: {title or 'новая сессия'}", 120)
     try:
         topic = await bot.create_forum_topic(forum_chat, name=name)
     except TelegramBadRequest as e:
-        await msg.edit_text(
+        await src_msg.edit_text(
             f"❌ Не удалось создать тему: <code>{html.escape(str(e)[:200])}</code>\n"
             "Проверь, что бот админ в группе и «Темы» включены.",
             reply_markup=kb([[btn("⬅️ Меню", "menu:main")]]),
@@ -258,8 +277,27 @@ async def _open_session(msg: Message, chat_type: str, user_id: int, db, ssh,
             message_thread_id=thread_id,
         )
     await _post_session_hints(bot, forum_chat, thread_id)
-    await msg.edit_text(
+    await src_msg.edit_text(
         "✅ Открыл сессию отдельной темой в группе. Переходи туда — весь чат с Claude идёт там."
+    )
+
+
+@router.callback_query(F.data.startswith("g:open:"))
+async def cb_group_open(cb: CallbackQuery, db, ssh):
+    i = int(cb.data.split(":")[2])
+    pending = _PENDING_OPEN.pop(cb.from_user.id, None)
+    if not pending:
+        await cb.answer("Выбор устарел — открой сессию заново", show_alert=True)
+        return
+    groups = await db.list_user_groups(cb.from_user.id)
+    if i >= len(groups):
+        await cb.answer("Список групп изменился", show_alert=True)
+        return
+    await cb.answer("Открываю…")
+    machine, cwd, session_id, title, project_dir = pending
+    await _create_session_topic(
+        cb.message.bot, db, ssh, cb.from_user.id, groups[i]["chat_id"],
+        machine, cwd, session_id, title, project_dir, cb.message,
     )
 
 
