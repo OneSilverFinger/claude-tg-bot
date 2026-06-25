@@ -27,6 +27,9 @@ never talks to Claude — it is only the control panel.
 - Connect a work group in one tap (deep-link `?startgroup`) with auto-binding:
   the bot links the group as soon as it is made admin in a supergroup with
   topics enabled. `/bindgroup` remains as a manual fallback.
+- Connect **multiple groups** and spread sessions across them: when you open a
+  session and have more than one group, the bot asks which one to open it in
+  (with a single group, nothing changes).
 - Each session = its own forum topic. The bot creates topics itself.
 - Resume existing sessions (`claude --resume`) with a recap of the last
   messages posted into the topic on open. Create new sessions.
