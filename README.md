@@ -152,11 +152,15 @@ and survives rebuilds. To update: `git pull && docker compose up -d --build`.
      icon → "Log in via subscription", see the auth section above).
 3. "Connect work group" → add the bot to a group (or create a new one in the
    same flow), enable "Topics" in it and make the bot an admin. The bot binds
-   the group automatically and says so.
-4. "Projects and sessions" → pick a project → pick a session (or "New session").
-   The bot opens it as its own topic in the group.
-5. Go to that topic and talk to Claude. Drop files and photos straight into the
-   topic.
+   the group automatically and says so. You can connect several groups.
+4. Open a session — two ways:
+   - "Projects and sessions" → pick a project → pick a session (or "New
+     session"). The bot opens it as a topic (asks which group if you have more
+     than one).
+   - Or just **create a topic in the group yourself** — the bot offers the same
+     machine → project → session setup right in that topic.
+5. Go to that topic and talk to Claude. Drop files, photos and voice messages
+   straight into the topic.
 
 ### Commands inside a topic
 
