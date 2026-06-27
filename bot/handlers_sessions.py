@@ -445,14 +445,13 @@ async def on_topic_created(message: Message, db, ssh):
         await message.answer(
             "🆕 Тема создана, но у тебя ещё нет машин. Добавь сервер в личке с ботом "
             "(/machines), потом вернись сюда и выбери сессию.",
-            message_thread_id=thread_id or None,
         )
         return
     rows = [[btn(f"{m['name']} ({m['username']}@{m['host']})", f"ts:mach:{m['id']}")]
             for m in machines]
     await message.answer(
         "🆕 <b>Новая тема — настроим сессию?</b>\nВыбери машину:",
-        reply_markup=kb(rows), message_thread_id=thread_id or None,
+        reply_markup=kb(rows),
     )
 
 
