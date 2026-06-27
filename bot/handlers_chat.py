@@ -506,8 +506,10 @@ async def _run_prompt(message: Message, db, ssh, prompt: str, qa_run: bool = Fal
     if run.session_id and run.session_id != binding.get("session_id"):
         await db.upsert_binding(*key, message.from_user.id, session_id=run.session_id)
 
-    # Sync forum topic name with Claude's auto-generated summary.
-    if new_summary and message.message_thread_id and not error and not run.stopped:
+    # Sync forum topic name with Claude's auto-generated summary — unless the
+    # user named the topic themselves (keep_name).
+    if (new_summary and message.message_thread_id and not error and not run.stopped
+            and not binding.get("keep_name")):
         summary = new_summary[-1]
         topic_name = f"{machine['name']}: {summary}"[:128]
         try:

@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS bindings(
   pending_files TEXT NOT NULL DEFAULT '[]',
   title TEXT,
   confirm_mode INTEGER NOT NULL DEFAULT 0,
+  keep_name INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (chat_id, thread_id)
 );
 
@@ -61,7 +62,7 @@ CREATE TABLE IF NOT EXISTS active_runs(
 """
 
 BINDING_FIELDS = {"machine_id", "cwd", "session_id", "model", "pending_files", "title",
-                  "confirm_mode", "user_id"}
+                  "confirm_mode", "keep_name", "user_id"}
 
 
 class Database:
@@ -87,6 +88,10 @@ class Database:
         if "confirm_mode" not in bcols:
             await self._db.execute(
                 "ALTER TABLE bindings ADD COLUMN confirm_mode INTEGER NOT NULL DEFAULT 0"
+            )
+        if "keep_name" not in bcols:
+            await self._db.execute(
+                "ALTER TABLE bindings ADD COLUMN keep_name INTEGER NOT NULL DEFAULT 0"
             )
         # Backfill the multi-group table from the legacy single forum group.
         await self._db.execute(
@@ -215,6 +220,13 @@ class Database:
             )
             row = await cur.fetchone()
             await self.set_forum_chat(user_id, row["chat_id"] if row else None)
+
+    async def group_owner(self, chat_id: int) -> int | None:
+        cur = await self._db.execute(
+            "SELECT user_id FROM user_groups WHERE chat_id=? LIMIT 1", (chat_id,)
+        )
+        row = await cur.fetchone()
+        return row["user_id"] if row else None
 
     async def list_user_groups(self, user_id: int) -> list[dict]:
         cur = await self._db.execute(

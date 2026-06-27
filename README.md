@@ -30,6 +30,9 @@ never talks to Claude — it is only the control panel.
 - Connect **multiple groups** and spread sessions across them: when you open a
   session and have more than one group, the bot asks which one to open it in
   (with a single group, nothing changes).
+- Or just **create a topic in the group yourself** — the bot detects the new
+  topic and runs the same setup flow right there (machine → project → session),
+  keeping the name you gave it.
 - Each session = its own forum topic. The bot creates topics itself.
 - Resume existing sessions (`claude --resume`) with a recap of the last
   messages posted into the topic on open. Create new sessions.

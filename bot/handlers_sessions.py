@@ -19,6 +19,8 @@ _PROJECT_CACHE: dict[tuple[int, int], list[dict]] = {}
 _SESSION_CACHE: dict[tuple[int, int], list[dict]] = {}
 # Pending session-open awaiting a group choice (>1 group), keyed by user_id.
 _PENDING_OPEN: dict[int, tuple] = {}
+# Topics the bot created itself — so the forum_topic_created handler skips them.
+_BOT_CREATED: set[tuple[int, int]] = set()
 
 NO_GROUP = (
     "🧵 <b>Нужна рабочая группа</b>\n\n"
@@ -252,6 +254,7 @@ async def _create_session_topic(bot, db, ssh, user_id: int, forum_chat: int,
     name = trunc(f"{machine['name']}: {title or 'новая сессия'}", 120)
     try:
         topic = await bot.create_forum_topic(forum_chat, name=name)
+        _BOT_CREATED.add((forum_chat, topic.message_thread_id))
     except TelegramBadRequest as e:
         await src_msg.edit_text(
             f"❌ Не удалось создать тему: <code>{html.escape(str(e)[:200])}</code>\n"
@@ -416,3 +419,59 @@ async def _post_recap(bot, ssh, machine, project_dir, session_id, chat_id, threa
         chat_id, "— продолжай диалог в этой теме —",
         message_thread_id=thread_id or None,
     )
+
+
+# ---- auto-setup when a user creates a forum topic ----
+
+@router.message(F.forum_topic_created)
+async def on_topic_created(message: Message, db, ssh):
+    """When a user creates a new forum topic in their group, offer the same
+    session setup flow as the bot's menu (machine → project → session)."""
+    chat_id = message.chat.id
+    thread_id = message.message_thread_id or 0
+    key = (chat_id, thread_id)
+    # Skip topics the bot created itself.
+    if key in _BOT_CREATED:
+        _BOT_CREATED.discard(key)
+        return
+    binding = await db.get_binding(chat_id, thread_id)
+    if binding and binding.get("machine_id"):
+        return  # already set up
+    owner = await db.group_owner(chat_id)
+    if owner is None:
+        return  # not a connected group
+    machines = await db.machines(owner)
+    if not machines:
+        await message.answer(
+            "🆕 Тема создана, но у тебя ещё нет машин. Добавь сервер в личке с ботом "
+            "(/machines), потом вернись сюда и выбери сессию.",
+            message_thread_id=thread_id or None,
+        )
+        return
+    rows = [[btn(f"{m['name']} ({m['username']}@{m['host']})", f"ts:mach:{m['id']}")]
+            for m in machines]
+    await message.answer(
+        "🆕 <b>Новая тема — настроим сессию?</b>\nВыбери машину:",
+        reply_markup=kb(rows), message_thread_id=thread_id or None,
+    )
+
+
+@router.callback_query(F.data.startswith("ts:mach:"))
+async def cb_ts_machine(cb: CallbackQuery, db, ssh):
+    machine_id = int(cb.data.split(":")[2])
+    chat_id = cb.message.chat.id
+    thread_id = cb.message.message_thread_id or 0
+    owner = await db.group_owner(chat_id)
+    machine = await db.machine(machine_id, owner) if owner is not None else None
+    if not machine:
+        await cb.answer("Машина не найдена", show_alert=True)
+        return
+    # Bind the machine to this user-made topic; keep_name=1 so the bot won't
+    # rename the topic the user named.
+    await db.upsert_binding(
+        chat_id, thread_id, owner,
+        machine_id=machine_id, cwd=None, session_id=None, title=None, keep_name=1,
+    )
+    await cb.answer()
+    await _show_projects(cb.message.bot, db, ssh, chat_id, thread_id, owner,
+                         edit_message=cb.message)
