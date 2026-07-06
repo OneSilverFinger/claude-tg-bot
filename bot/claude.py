@@ -77,7 +77,30 @@ if [ "$HAS_NODE" = "0" ]; then
         nvm use 22 2>/dev/null || true
     fi
 
-    # Strategy 2: fnm
+    # Strategy 2: official Node.js tarball — needs only curl + tar + gzip
+    # (no unzip, no sudo). Most portable fallback.
+    if ! command -v node >/dev/null 2>&1; then
+        echo "INFO:Ставлю Node.js с nodejs.org (tarball)..."
+        NV=v22.11.0
+        case "$(uname -m)" in
+            x86_64) NA=x64 ;;
+            aarch64|arm64) NA=arm64 ;;
+            *) NA="" ;;
+        esac
+        if [ -n "$NA" ]; then
+            TARF=$(mktemp /tmp/node_XXXXXX.tar.gz)
+            if curl -fsSL "https://nodejs.org/dist/${NV}/node-${NV}-linux-${NA}.tar.gz" -o "$TARF" 2>/dev/null; then
+                mkdir -p "${HOME}/.local/node"
+                tar -xzf "$TARF" -C "${HOME}/.local/node" --strip-components=1 2>/dev/null
+                export PATH="${HOME}/.local/node/bin:${PATH}"
+                grep -qF '.local/node/bin' "${HOME}/.profile" 2>/dev/null \
+                    || printf '\nexport PATH="$HOME/.local/node/bin:$PATH"\n' >> "${HOME}/.profile"
+            fi
+            rm -f "$TARF"
+        fi
+    fi
+
+    # Strategy 3: fnm (last resort; needs unzip)
     if ! command -v node >/dev/null 2>&1; then
         FNM_DIR="${HOME}/.fnm"
         if [ ! -x "${FNM_DIR}/fnm" ]; then
