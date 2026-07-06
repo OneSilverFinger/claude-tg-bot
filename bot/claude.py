@@ -356,6 +356,20 @@ async def session_tail(ssh, machine: dict, project_dir: str, session_id: str,
     return messages[-max_messages:]
 
 
+# The bot invokes claude one-shot per user message; there is no self-initiated
+# next turn, so any "I'll come back later" / background-and-return work never
+# reaches the user. Steer claude to finish within the turn.
+_TURN_SYSTEM_PROMPT = (
+    "Ты отвечаешь через Telegram-бота в одноразовом режиме: один ответ на одно "
+    "сообщение пользователя, следующего хода по своей инициативе у тебя нет. "
+    "Доводи задачу до результата ПРЯМО СЕЙЧАС, в этом ходе. Не откладывай ответ "
+    "«на потом», не уводи работу в фон с намерением вернуться позже и не планируй "
+    "отложенные проверки/наблюдение — такое сообщение до пользователя не дойдёт. "
+    "Фоновые команды допустимы, только если ты дождёшься их и проверишь итог в "
+    "ЭТОМ же ходе. Если нужно подождать процесс — жди синхронно здесь и верни итог."
+)
+
+
 class ClaudeRun:
     """One non-interactive claude invocation, launched *detached* on the remote.
 
@@ -387,6 +401,7 @@ class ClaudeRun:
             "claude", "-p",
             "--output-format", "stream-json", "--verbose",
             "--permission-mode", self.permission_mode,
+            "--append-system-prompt", _TURN_SYSTEM_PROMPT,
         ]
         if self.model:
             parts += ["--model", self.model]
