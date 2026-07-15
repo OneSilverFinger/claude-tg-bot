@@ -96,7 +96,7 @@ async def cb_select(cb: CallbackQuery, db):
 
 
 @router.callback_query(F.data.startswith("m:stat:"))
-async def cb_machine_status(cb: CallbackQuery, db, ssh):
+async def cb_machine_status(cb: CallbackQuery, db, ssh, crypto):
     machine_id = int(cb.data.split(":")[2])
     machine = await db.machine(machine_id, cb.from_user.id)  # scoped to owner
     if not machine:
@@ -105,8 +105,10 @@ async def cb_machine_status(cb: CallbackQuery, db, ssh):
     await cb.answer()
     await cb.message.edit_text(f"⏳ Собираю статус <b>{html.escape(machine['name'])}</b>…")
     data = await machine_status.collect(ssh, machine)
+    all_machines = await db.machines(cb.from_user.id)
+    tok_line = machine_status.token_line(crypto, machine, all_machines)
     await cb.message.edit_text(
-        machine_status.render(machine, data),
+        machine_status.render(machine, data, tok_line),
         reply_markup=kb([
             [btn("🔄 Обновить", f"m:stat:{machine_id}")],
             [btn("⬅️ Машины", "menu:machines")],

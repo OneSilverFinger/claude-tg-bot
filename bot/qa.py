@@ -147,33 +147,39 @@ async def new_screenshots(ssh, machine: dict, cwd: str, since_mtime: float,
     """
     exclude = exclude or set()
     sftp = await ssh.sftp(machine)
-    shots_dir = f"{cwd.rstrip('/')}/{SHOTS_DIR}"
     try:
-        entries = await sftp.readdir(shots_dir)
-    except (asyncssh.SFTPError, OSError):
-        return []
-
-    picked = []
-    for e in entries:
-        if e.filename in (".", "..") or e.filename in exclude:
-            continue
-        if not e.filename.lower().endswith((".png", ".jpg", ".jpeg")):
-            continue
-        if (e.attrs.mtime or 0) < since_mtime - 1:
-            continue
-        if (e.attrs.size or 0) > MAX_SHOT_BYTES:
-            continue
-        picked.append(e)
-
-    picked.sort(key=lambda e: e.attrs.mtime or 0)
-    out: list[tuple[str, bytes]] = []
-    for e in picked[:MAX_SHOTS]:
+        shots_dir = f"{cwd.rstrip('/')}/{SHOTS_DIR}"
         try:
-            async with sftp.open(f"{shots_dir}/{e.filename}", "rb") as f:
-                out.append((e.filename, await f.read()))
+            entries = await sftp.readdir(shots_dir)
+        except (asyncssh.SFTPError, OSError):
+            return []
+
+        picked = []
+        for e in entries:
+            if e.filename in (".", "..") or e.filename in exclude:
+                continue
+            if not e.filename.lower().endswith((".png", ".jpg", ".jpeg")):
+                continue
+            if (e.attrs.mtime or 0) < since_mtime - 1:
+                continue
+            if (e.attrs.size or 0) > MAX_SHOT_BYTES:
+                continue
+            picked.append(e)
+
+        picked.sort(key=lambda e: e.attrs.mtime or 0)
+        out: list[tuple[str, bytes]] = []
+        for e in picked[:MAX_SHOTS]:
+            try:
+                async with sftp.open(f"{shots_dir}/{e.filename}", "rb") as f:
+                    out.append((e.filename, await f.read()))
+            except Exception:
+                continue
+        return out
+    finally:
+        try:
+            sftp.exit()
         except Exception:
-            continue
-    return out
+            pass
 
 
 async def read_progress(ssh, machine: dict, cwd: str) -> str:
@@ -184,10 +190,13 @@ async def read_progress(ssh, machine: dict, cwd: str) -> str:
         async with sftp.open(path, "rb") as f:
             data = await f.read(MAX_PROGRESS_BYTES)
         return data.decode("utf-8", errors="replace").strip()
-    except (asyncssh.SFTPError, OSError):
-        return ""
     except Exception:
         return ""
+    finally:
+        try:
+            sftp.exit()
+        except Exception:
+            pass
 
 
 ORCHESTRATION_PROMPT = f"""\

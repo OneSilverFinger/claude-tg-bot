@@ -192,7 +192,8 @@ async def _post_session_hints(bot, chat_id: int, thread_id: int):
         "💡 <b>Можно сразу настроить тему:</b>\n"
         "• /confirm — режим с подтверждением (Claude сначала покажет план, "
         "выполнит по кнопке «Выполнить»)\n"
-        "• /model — выбрать модель (opus / sonnet / haiku)",
+        "• /model — выбрать модель (opus / sonnet / haiku / fable)\n"
+        "• /whichmodel — какая модель настроена и что реально было в последнем ответе",
         message_thread_id=thread_id or None,
     )
 

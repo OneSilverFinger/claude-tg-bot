@@ -22,7 +22,7 @@ WELCOME = (
     "и голосовые.\n\n"
     "⚠️ Пока не открыл сессию (шаг 3) и не зашёл в тему — Claude не отвечает. "
     "В личке он не работает, это только панель управления.\n\n"
-    "Команды внутри темы: /status · /model · /sessions · /test · /confirm · /stop · /unbind"
+    "Команды внутри темы: /status · /model · /whichmodel · /sessions · /test · /confirm · /stop · /unbind"
 )
 
 _bot_username: str | None = None
@@ -150,7 +150,7 @@ async def on_my_chat_member(update: ChatMemberUpdated, db):
 
 # ---- model ----
 
-MODELS = [("Opus", "opus"), ("Sonnet", "sonnet"), ("Haiku", "haiku")]
+MODELS = [("Opus", "opus"), ("Sonnet", "sonnet"), ("Haiku", "haiku"), ("Fable", "fable")]
 
 
 def model_kb(current: str | None, private: bool):

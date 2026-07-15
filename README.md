@@ -39,7 +39,8 @@ never talks to Claude — it is only the control panel.
 - Live streaming of Claude's work (`--output-format stream-json`): tool calls
   and text appear as they are generated, with an elapsed-time heartbeat during
   long silent steps.
-- Pick a model (opus / sonnet / haiku) per topic with `/model`.
+- Pick a model (opus / sonnet / haiku / fable) per topic with `/model`;
+  `/whichmodel` shows the configured and actual model + token fingerprint.
 - Send files and photos: uploaded to the server, the path is passed to Claude.
 - Voice and video notes are transcribed (any OpenAI-compatible Whisper endpoint —
   Groq / OpenAI / local) and sent to Claude as the prompt. Optional, off until
@@ -53,9 +54,23 @@ never talks to Claude — it is only the control panel.
   live, then a PASS/FAIL report. Say "fix it" and the agent fixes with full test
   context.
 - **Auto-send referenced files**: if Claude's answer points at a real deliverable
-  file (image, pdf, archive, csv, doc…), the bot sends the actual file.
+  file (image, pdf, archive, csv, yaml/json, doc…), the bot sends the actual file
+  — searching subdirectories of the working dir too (project-in-a-subfolder).
+- **Tables as images**: Markdown tables in an answer are rendered to PNG (Telegram
+  can't display tables readably) and sent in place — text before → image → text
+  after.
+- **Message debounce**: a long message split by Telegram into parts (or quick
+  follow-ups) is collected for ~3s and sent to Claude as one prompt.
+- **Duplicate dedup**: re-delivered Telegram updates (proxy re-fetch / restart) and
+  the same text within a window are dropped — one request runs once.
+- **Background-task continuation**: if Claude launches a long background task
+  (registered under `~/.claude/tg-runs/<id>.bg/`), the bot waits for it and
+  auto-continues the session with its output (a one-shot turn can't wait).
+- **Session mirror**: new assistant messages that appear in the same session from
+  a VS Code session are forwarded into the topic.
 - **Per-machine status** (📊 in `/machines`): connectivity, Claude version/auth,
-  disk/RAM/load, and consumed Claude usage (tokens over 5h / today / total).
+  disk/RAM/load, consumed Claude usage (tokens over 5h / today / total), and the
+  token fingerprint (which machines share a token).
 - **Survives restarts**: runs are launched detached on the remote, so a bot
   restart doesn't kill them — on startup the bot re-attaches and delivers the
   result; the session context is preserved either way.
@@ -165,7 +180,8 @@ and survives rebuilds. To update: `git pull && docker compose up -d --build`.
 ### Commands inside a topic
 
 - `/sessions` — switch the project/session for this topic.
-- `/model` — choose the model for this topic.
+- `/model` — choose the model for this topic (opus / sonnet / haiku / fable).
+- `/whichmodel` — configured and actual (from the last answer) model + token.
 - `/confirm` — toggle confirmation mode (plan → execute) for this topic.
 - `/test` — run an independent manual-QA pass on what was built.
 - `/status` — what is currently bound to the topic.
@@ -193,8 +209,9 @@ bot/
   config.py            load and validate .env
   crypto.py            encrypt SSH secrets (Fernet)
   db.py                SQLite: machines, chat→session bindings, prefs
-  access.py            whitelist middleware
+  access.py            whitelist middleware + update dedup
   ssh.py               SSH connection pool (asyncssh), machine test
+  tables.py            render Markdown tables to PNG (Pillow)
   claude.py            run claude (detached + follow), stream-json, sessions, recap, install
   transcribe.py        voice/video-note transcription (OpenAI-compatible STT)
   qa.py                independent QA: install Playwright, orchestration, screenshots

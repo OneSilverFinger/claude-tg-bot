@@ -7,7 +7,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 
-from .access import AccessMiddleware
+from .access import AccessMiddleware, DedupMiddleware
 from .config import load_config
 from .crypto import Crypto
 from .db import Database
@@ -46,6 +46,9 @@ async def main():
     dp["crypto"] = crypto
     dp["config"] = config
 
+    # Dedup first (outermost) so re-delivered updates are dropped before anything
+    # else runs, then whitelist enforcement.
+    dp.update.outer_middleware(DedupMiddleware(db))
     dp.update.outer_middleware(AccessMiddleware(config.allowed_user_ids))
 
     # Order matters: specific command/callback routers before the catch-all

@@ -40,8 +40,14 @@ async def push_claude_key(ssh, machine: dict, token: str) -> None:
     await ssh.run(machine, "mkdir -p ~/.claude && chmod 700 ~/.claude", timeout=15)
     sftp = await ssh.sftp(machine)
     content = f"CLAUDE_CODE_OAUTH_TOKEN='{token}'\n"
-    async with sftp.open(KEY_FILE, "w") as f:
-        await f.write(content)
+    try:
+        async with sftp.open(KEY_FILE, "w") as f:
+            await f.write(content)
+    finally:
+        try:
+            sftp.exit()
+        except Exception:
+            pass
     await ssh.run(machine, f"chmod 600 ~/{KEY_FILE}", timeout=15)
 
 
@@ -288,60 +294,72 @@ async def list_projects(ssh, machine: dict, limit: int = 15) -> list[dict]:
     """Project directories under ~/.claude/projects, newest first."""
     sftp = await ssh.sftp(machine)
     try:
-        entries = await sftp.readdir(PROJECTS_DIR)
-    except (asyncssh.SFTPError, OSError):
-        return []
-
-    dirs = [e for e in entries if e.filename not in (".", "..")]
-    dirs.sort(key=lambda e: e.attrs.mtime or 0, reverse=True)
-
-    projects = []
-    for entry in dirs:
-        if len(projects) >= limit:
-            break
-        dir_path = f"{PROJECTS_DIR}/{entry.filename}"
         try:
-            files = await sftp.readdir(dir_path)
+            entries = await sftp.readdir(PROJECTS_DIR)
         except (asyncssh.SFTPError, OSError):
-            continue
-        jsonls = [f for f in files if f.filename.endswith(".jsonl")]
-        if not jsonls:
-            continue
-        newest = max(jsonls, key=lambda f: f.attrs.mtime or 0)
-        head = await _read_head(sftp, f"{dir_path}/{newest.filename}")
-        meta = _extract_meta(_parse_lines(head))
-        projects.append({
-            "dir": entry.filename,
-            "cwd": meta["cwd"] or entry.filename,
-            "count": len(jsonls),
-            "mtime": newest.attrs.mtime or 0,
-        })
-    return projects
+            return []
+
+        dirs = [e for e in entries if e.filename not in (".", "..")]
+        dirs.sort(key=lambda e: e.attrs.mtime or 0, reverse=True)
+
+        projects = []
+        for entry in dirs:
+            if len(projects) >= limit:
+                break
+            dir_path = f"{PROJECTS_DIR}/{entry.filename}"
+            try:
+                files = await sftp.readdir(dir_path)
+            except (asyncssh.SFTPError, OSError):
+                continue
+            jsonls = [f for f in files if f.filename.endswith(".jsonl")]
+            if not jsonls:
+                continue
+            newest = max(jsonls, key=lambda f: f.attrs.mtime or 0)
+            head = await _read_head(sftp, f"{dir_path}/{newest.filename}")
+            meta = _extract_meta(_parse_lines(head))
+            projects.append({
+                "dir": entry.filename,
+                "cwd": meta["cwd"] or entry.filename,
+                "count": len(jsonls),
+                "mtime": newest.attrs.mtime or 0,
+            })
+        return projects
+    finally:
+        try:
+            sftp.exit()
+        except Exception:
+            pass
 
 
 async def list_sessions(ssh, machine: dict, project_dir: str, limit: int = 10) -> list[dict]:
     """Sessions inside one project directory, newest first."""
     sftp = await ssh.sftp(machine)
-    dir_path = f"{PROJECTS_DIR}/{project_dir}"
     try:
-        files = await sftp.readdir(dir_path)
-    except (asyncssh.SFTPError, OSError):
-        return []
+        dir_path = f"{PROJECTS_DIR}/{project_dir}"
+        try:
+            files = await sftp.readdir(dir_path)
+        except (asyncssh.SFTPError, OSError):
+            return []
 
-    jsonls = [f for f in files if f.filename.endswith(".jsonl")]
-    jsonls.sort(key=lambda f: f.attrs.mtime or 0, reverse=True)
+        jsonls = [f for f in files if f.filename.endswith(".jsonl")]
+        jsonls.sort(key=lambda f: f.attrs.mtime or 0, reverse=True)
 
-    sessions = []
-    for entry in jsonls[:limit]:
-        head = await _read_head(sftp, f"{dir_path}/{entry.filename}")
-        meta = _extract_meta(_parse_lines(head))
-        sessions.append({
-            "id": entry.filename[:-len(".jsonl")],
-            "cwd": meta["cwd"],
-            "title": meta["title"],
-            "mtime": entry.attrs.mtime or 0,
-        })
-    return sessions
+        sessions = []
+        for entry in jsonls[:limit]:
+            head = await _read_head(sftp, f"{dir_path}/{entry.filename}")
+            meta = _extract_meta(_parse_lines(head))
+            sessions.append({
+                "id": entry.filename[:-len(".jsonl")],
+                "cwd": meta["cwd"],
+                "title": meta["title"],
+                "mtime": entry.attrs.mtime or 0,
+            })
+        return sessions
+    finally:
+        try:
+            sftp.exit()
+        except Exception:
+            pass
 
 
 async def session_tail(ssh, machine: dict, project_dir: str, session_id: str,
@@ -353,15 +371,21 @@ async def session_tail(ssh, machine: dict, project_dir: str, session_id: str,
     sftp = await ssh.sftp(machine)
     path = f"{PROJECTS_DIR}/{project_dir}/{session_id}.jsonl"
     try:
-        attrs = await sftp.stat(path)
-        size = attrs.size or 0
-        offset = max(0, size - TAIL_BYTES)
-        async with sftp.open(path, "rb") as f:
-            if offset:
-                await f.seek(offset)
-            data = await f.read(TAIL_BYTES + 1024)
-    except Exception:
-        return []
+        try:
+            attrs = await sftp.stat(path)
+            size = attrs.size or 0
+            offset = max(0, size - TAIL_BYTES)
+            async with sftp.open(path, "rb") as f:
+                if offset:
+                    await f.seek(offset)
+                data = await f.read(TAIL_BYTES + 1024)
+        except Exception:
+            return []
+    finally:
+        try:
+            sftp.exit()
+        except Exception:
+            pass
 
     messages: list[tuple[str, str]] = []
     for obj in _parse_lines(data, skip_first_partial=offset > 0):
@@ -379,18 +403,160 @@ async def session_tail(ssh, machine: dict, project_dir: str, session_id: str,
     return messages[-max_messages:]
 
 
-# The bot invokes claude one-shot per user message; there is no self-initiated
-# next turn, so any "I'll come back later" / background-and-return work never
-# reaches the user. Steer claude to finish within the turn.
-_TURN_SYSTEM_PROMPT = (
-    "Ты отвечаешь через Telegram-бота в одноразовом режиме: один ответ на одно "
-    "сообщение пользователя, следующего хода по своей инициативе у тебя нет. "
-    "Доводи задачу до результата ПРЯМО СЕЙЧАС, в этом ходе. Не откладывай ответ "
-    "«на потом», не уводи работу в фон с намерением вернуться позже и не планируй "
-    "отложенные проверки/наблюдение — такое сообщение до пользователя не дойдёт. "
-    "Фоновые команды допустимы, только если ты дождёшься их и проверишь итог в "
-    "ЭТОМ же ходе. Если нужно подождать процесс — жди синхронно здесь и верни итог."
-)
+# Neutral, opt-in protocol: if claude backgrounds a long task and registers it
+# under ~/.claude/tg-runs/<run_id>.bg/, the bot waits for it and auto-continues
+# the session with its output. This does NOT muzzle background work — it enables
+# it (the bot handles the "come back later" the one-shot turn can't do itself).
+def _bg_system_prompt(run_id: str) -> str:
+    d = f"~/{RUNS_DIR}/{run_id}.bg"
+    return (
+        "Ты работаешь через Telegram-бота: один ответ на один ход, сам себе "
+        "следующий ход инициировать не можешь. Но если нужно запустить ДОЛГУЮ "
+        "задачу в фоне (сборка, деплой, тесты, обучение, миграция и т.п.) и чтобы "
+        "пользователь получил её результат — НЕ жди её в этом ходе, а оформи так:\n"
+        f"  mkdir -p {d} && nohup <команда> > {d}/<имя>.out 2>&1 & echo $! > {d}/<имя>.pid\n"
+        "где <имя> — короткий слаг задачи (латиницей). Заверши ответ, сказав что "
+        "задача запущена в фоне. Бот сам дождётся завершения всех таких задач, "
+        "продолжит ЭТУ ЖЕ сессию с их выводом и покажет результат пользователю. "
+        "Если фон не нужен — работай как обычно и доводи ответ в этом ходе."
+    )
+
+
+async def bg_tasks(ssh, machine: dict, run_id: str) -> list[dict]:
+    """Background tasks a run registered under ~/RUNS_DIR/<run_id>.bg/.
+
+    Returns list of {'name', 'pid', 'running', 'out'} (out is home-relative).
+    """
+    d = f"{RUNS_DIR}/{run_id}.bg"
+    q = shlex.quote(d)
+    cmd = (
+        f'cd "$HOME" 2>/dev/null || exit 0; d={q}; '
+        f'for p in "$d"/*.pid; do [ -e "$p" ] || continue; '
+        f'pid=$(cat "$p" 2>/dev/null); '
+        f'if kill -0 "$pid" 2>/dev/null; then st=run; else st=done; fi; '
+        f'printf "%s|%s|%s\\n" "$p" "$pid" "$st"; done'
+    )
+    try:
+        res = await ssh.run(machine, cmd, timeout=15)
+    except Exception:
+        return []
+    tasks = []
+    for line in (res.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        bits = line.split("|")
+        if len(bits) != 3:
+            continue
+        pidfile, pid, st = bits
+        name = pidfile.rsplit("/", 1)[-1]
+        if name.endswith(".pid"):
+            name = name[:-4]
+        tasks.append({
+            "name": name, "pid": pid, "running": st == "run",
+            "out": pidfile[:-4] + ".out",
+        })
+    return tasks
+
+
+async def read_bg_output(ssh, machine: dict, out_path: str, limit: int = 4000) -> str:
+    """Tail of a background task's output file (home-relative path)."""
+    sftp = None
+    try:
+        sftp = await ssh.sftp(machine)
+        size = (await sftp.stat(out_path)).size or 0
+        async with sftp.open(out_path, "rb") as f:
+            if size > limit:
+                await f.seek(size - limit)
+            data = await f.read()
+    except Exception:
+        return ""
+    finally:
+        if sftp is not None:
+            try:
+                sftp.exit()
+            except Exception:
+                pass
+    return data.decode("utf-8", errors="replace")
+
+
+async def last_session_model(ssh, machine: dict, session_id: str) -> str | None:
+    """The model id of the most recent assistant message in a session, e.g.
+    'claude-opus-4-8'. Read straight from the session jsonl — the ground truth
+    of what actually ran, not what the binding requested."""
+    path = await find_session_file(ssh, machine, session_id)
+    if not path:
+        return None
+    sftp = None
+    try:
+        sftp = await ssh.sftp(machine)
+        size = (await sftp.stat(path)).size or 0
+        async with sftp.open(path, "rb") as f:
+            if size > 200000:
+                await f.seek(size - 200000)
+            data = await f.read()
+    except Exception:
+        return None
+    finally:
+        if sftp is not None:
+            try:
+                sftp.exit()
+            except Exception:
+                pass
+    model = None
+    for obj in _parse_lines(data, skip_first_partial=size > 200000):
+        if obj.get("type") == "assistant":
+            m = (obj.get("message") or {}).get("model")
+            if m:
+                model = m
+    return model
+
+
+async def find_session_file(ssh, machine: dict, session_id: str) -> str | None:
+    """Absolute path of a session's jsonl under ~/.claude/projects/*/, or None."""
+    q = shlex.quote(session_id)
+    try:
+        res = await ssh.run(
+            machine,
+            f'ls -1 "$HOME"/{PROJECTS_DIR}/*/{q}.jsonl 2>/dev/null | head -1',
+            timeout=15,
+        )
+    except Exception:
+        return None
+    lines = [l.strip() for l in (res.stdout or "").splitlines() if l.strip()]
+    return lines[0] if lines else None
+
+
+async def new_assistant_messages(sftp, path: str, offset: int):
+    """Read the session jsonl from `offset` using an already-open SFTP client,
+    returning (new_offset, texts).
+
+    The caller owns and reuses the SFTP client (do NOT open a new one per call —
+    that leaks channels and exhausts sshd MaxSessions). Errors propagate so the
+    caller can reopen its client.
+
+    `texts` are assistant message texts written after `offset`. Only whole lines
+    are consumed; the new offset points at the start of any trailing partial line
+    so a message half-written during the read isn't lost or duplicated.
+    """
+    async with sftp.open(path, "rb") as f:
+        await f.seek(offset)
+        data = await f.read()
+    if not data:
+        return offset, []
+    nl = data.rfind(b"\n")
+    if nl == -1:
+        return offset, []            # no complete line yet
+    complete = data[: nl + 1]
+    new_offset = offset + len(complete)
+    texts: list[str] = []
+    for obj in _parse_lines(complete, skip_first_partial=False):
+        if obj.get("type") != "assistant" or obj.get("isMeta"):
+            continue
+        text = _text_of_content((obj.get("message") or {}).get("content")).strip()
+        if text:
+            texts.append(text)
+    return new_offset, texts
 
 
 class ClaudeRun:
@@ -424,7 +590,7 @@ class ClaudeRun:
             "claude", "-p",
             "--output-format", "stream-json", "--verbose",
             "--permission-mode", self.permission_mode,
-            "--append-system-prompt", _TURN_SYSTEM_PROMPT,
+            "--append-system-prompt", _bg_system_prompt(self.run_id),
         ]
         if self.model:
             parts += ["--model", self.model]
@@ -437,7 +603,11 @@ class ClaudeRun:
         rid = self.run_id
         return (
             "#!/bin/bash\n"
-            f'if [ -f "$HOME/{KEY_FILE}" ]; then set -a; . "$HOME/{KEY_FILE}"; set +a; fi\n'
+            # When we have a subscription token, force it: drop any API key that a
+            # login shell / Claude Code update might have introduced, so runs bill
+            # to the Pro/Max subscription and never silently fall back to API.
+            f'if [ -f "$HOME/{KEY_FILE}" ]; then set -a; . "$HOME/{KEY_FILE}"; set +a;'
+            ' unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; fi\n'
             # claude refuses --dangerously-skip-permissions as root unless this is
             # set; mark root sessions as sandboxed so bypassPermissions works.
             '[ "$(id -u)" = "0" ] && export IS_SANDBOX=1\n'
@@ -453,6 +623,7 @@ class ClaudeRun:
         # (a single SFTP drop must not kill the whole run). Idempotent: both files
         # are overwritten, and the detached process is only spawned after.
         for attempt in (1, 2):
+            sftp = None
             try:
                 sftp = await ssh.sftp(self.machine)
                 async with sftp.open(f"{RUNS_DIR}/{self.run_id}.prompt", "w") as f:
@@ -464,6 +635,12 @@ class ClaudeRun:
                 ssh.drop(self.machine["id"])
                 if attempt == 2:
                     raise
+            finally:
+                if sftp is not None:
+                    try:
+                        sftp.exit()
+                    except Exception:
+                        pass
         launch = (
             f"setsid bash ~/{RUNS_DIR}/{self.run_id}.sh </dev/null >/dev/null 2>&1 & "
             f"echo $! > ~/{RUNS_DIR}/{self.run_id}.pid"

@@ -59,6 +59,10 @@ CREATE TABLE IF NOT EXISTS active_runs(
   started_at TEXT DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (chat_id, thread_id)
 );
+CREATE TABLE IF NOT EXISTS processed_updates(
+  update_id INTEGER PRIMARY KEY,
+  seen_at REAL NOT NULL
+);
 """
 
 BINDING_FIELDS = {"machine_id", "cwd", "session_id", "model", "pending_files", "title",
@@ -98,6 +102,39 @@ class Database:
             "INSERT OR IGNORE INTO user_groups(user_id, chat_id) "
             "SELECT user_id, forum_chat_id FROM user_prefs WHERE forum_chat_id IS NOT NULL"
         )
+
+    async def mark_update_seen(self, update_id: int, now: float) -> bool:
+        """Record a Telegram update_id. Returns True if it's new (process it),
+        False if already seen (a re-delivered duplicate — drop it). Idempotent
+        across restarts, so proxy re-fetches / restart re-deliveries don't cause
+        the same message to run twice."""
+        cur = await self._db.execute(
+            "INSERT OR IGNORE INTO processed_updates(update_id, seen_at) VALUES(?, ?)",
+            (update_id, now),
+        )
+        await self._db.commit()
+        if cur.rowcount == 0:
+            return False
+        # Prune occasionally so the table can't grow unbounded.
+        if update_id % 500 == 0:
+            await self._db.execute(
+                "DELETE FROM processed_updates WHERE seen_at < ?", (now - 86400,)
+            )
+            await self._db.commit()
+        return True
+
+    async def chat_has_topic_bindings(self, chat_id: int) -> bool:
+        """True if this chat has any session bound inside a topic (thread != 0).
+
+        Used to warn a user who typed in the group's General that their sessions
+        live in topics.
+        """
+        cur = await self._db.execute(
+            "SELECT 1 FROM bindings WHERE chat_id=? AND thread_id<>0 "
+            "AND machine_id IS NOT NULL LIMIT 1",
+            (chat_id,),
+        )
+        return (await cur.fetchone()) is not None
 
     async def close(self) -> None:
         if self._db is not None:

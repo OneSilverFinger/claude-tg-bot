@@ -8,12 +8,41 @@ limits). Everything runs on the machine the caller owns; the handler resolves
 the machine by (machine_id, user_id) so a user only ever sees their own.
 """
 
+import hashlib
 import json
 import logging
+import re
 
 from .ssh import login_shell
 
 log = logging.getLogger(__name__)
+
+
+def token_fingerprint(crypto, enc: str | None) -> str | None:
+    """Short, non-secret fingerprint of a machine's Claude token, so tokens can
+    be compared across machines (same fp = same token) without exposing them."""
+    if not enc:
+        return None
+    try:
+        val = crypto.decrypt(enc)
+    except Exception:
+        return None
+    m = re.search(r"oat[0-9]+-[A-Za-z0-9_\-]+", val) or re.search(r"sk-ant-[A-Za-z0-9_\-]+", val)
+    tok = m.group(0) if m else val.strip()
+    return hashlib.sha256(tok.encode()).hexdigest()[:10]
+
+
+def token_line(crypto, machine: dict, all_machines: list[dict]) -> str:
+    """One line describing the machine's token fingerprint and which other
+    machines share the same token."""
+    fp = token_fingerprint(crypto, machine.get("claude_key_enc"))
+    if not fp:
+        return "🔑 Токен: не задан"
+    shared = [mm["name"] for mm in all_machines
+              if mm.get("id") != machine.get("id")
+              and token_fingerprint(crypto, mm.get("claude_key_enc")) == fp]
+    tail = ("общий с: " + ", ".join(shared)) if shared else "уникальный"
+    return f"🔑 Токен: <code>{fp}</code> ({tail})"
 
 _HEALTH = login_shell(
     'echo "CLAUDE:$(command -v claude >/dev/null 2>&1 && claude --version 2>/dev/null | tail -1 || echo none)"; '
@@ -107,7 +136,7 @@ async def collect(ssh, machine: dict) -> dict:
     return out
 
 
-def render(machine: dict, data: dict) -> str:
+def render(machine: dict, data: dict, tok_line: str | None = None) -> str:
     import html
     name = html.escape(machine["name"])
     if not data.get("ok"):
@@ -121,6 +150,10 @@ def render(machine: dict, data: dict) -> str:
         f"📊 <b>Статус: {name}</b>",
         "🔌 Связь: OK",
         f"🤖 Claude: {claude_line} · авторизация: {html.escape(h.get('AUTH', '?'))}",
+    ]
+    if tok_line:
+        lines.append(tok_line)
+    lines += [
         f"💾 Диск: {html.escape(h.get('DISK', '?'))}",
         f"⚙️ Load: {html.escape(h.get('LOAD', '?'))} · RAM: {html.escape(h.get('RAM', '?'))}",
     ]
